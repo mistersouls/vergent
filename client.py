@@ -32,13 +32,29 @@ async def main():
     start = time.time()
 
     msg = {
-        "type": "get",
-        "payload": {"key": "souls"}
+        "type": "put",
+        "payload": {"key": "users/username", "value": "souls"}
     }
-
     print("→ Sending:", msg)
     await send_message(writer, msg)
+    response = await read_message(reader)
+    print("← Received:", response)
 
+    msg = {
+        "type": "get",
+        "payload": {"key": "users/username"}
+    }
+    print("→ Sending:", msg)
+    await send_message(writer, msg)
+    response = await read_message(reader)
+    print("← Received:", response)
+
+    msg = {
+        "type": "delete",
+        "payload": {"key": "users/username"}
+    }
+    print("→ Sending:", msg)
+    await send_message(writer, msg)
     response = await read_message(reader)
     print("← Received:", response)
 

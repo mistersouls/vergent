@@ -25,3 +25,23 @@ The goal of **Vergent** is to explore a new direction for distributed data: a le
 about while offering a practical balance between performance, safety, and simplicity. I want a system that embraces decentralization
 without sacrificing clarity, and that scales naturally across unreliable networks.
 
+
+## Running locally (In progress)
+
+For now, **Vergent** runs as a single local node so I can iterate quickly on the protocol and storage engine.
+To try it out:
+
+```bash
+git clone https://github.com/mistersouls/vergent
+cd vergent
+python -m vergentdb
+```
+
+This starts a standalone instance with an embedded storage backend.
+You can then send simple requests (put/get/delete) using `client.py` with:
+
+```bash
+python client.py
+```
+
+A proper CLI and client library will come later as the project evolves.
