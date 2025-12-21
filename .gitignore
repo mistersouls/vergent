@@ -1,0 +1,8 @@
+# Generated
+db/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDEA
+.idea/
