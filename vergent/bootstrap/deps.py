@@ -17,14 +17,16 @@ def get_storage() -> Storage:
 
 @lru_cache
 def get_app() -> App:
-    args = get_cli_args()
-    address = args.advertise_address or f"{args.host}:{args.port}"
-
-    app = App(
-        advertise_address=address,
-        peers=set(args.peers)
-    )
+    app = App()
     return app
+
+
+@lru_cache
+def get_advertise_address() -> str:
+    args = get_cli_args()
+    if args.advertise_address:
+        return args.advertise_address
+    return f"{args.host}:{args.port}"
 
 
 @lru_cache

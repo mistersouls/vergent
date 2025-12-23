@@ -6,7 +6,7 @@ import struct
 
 
 HOST = "127.0.0.1"
-PORT = 8000
+PORT = 2002
 
 
 async def send_message(writer, msg):

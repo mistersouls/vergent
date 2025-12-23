@@ -1,5 +1,5 @@
 
-from vergent.bootstrap.deps import get_storage, get_app
+from vergent.bootstrap.deps import get_storage, get_app, get_advertise_address
 
 from vergent.core.model.event import Event
 
@@ -31,4 +31,4 @@ async def get(data: dict) -> Event:
 
 @app.request("ping")
 async def ping(data: dict) -> Event:
-    return Event(type="pong", payload={"from": "", "epoch": 0})
+    return Event(type="pong", payload={"from": get_advertise_address(), "epoch": 0})

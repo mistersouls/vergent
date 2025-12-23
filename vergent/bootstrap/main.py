@@ -1,14 +1,22 @@
 import asyncio
+import functools
 
-from vergent.bootstrap.deps import get_cli_args
-from vergent.core.config import Config
-from vergent.core.peering import PeerManager
-from vergent.core.server import Server
+from vergent.bootstrap.deps import get_cli_args, get_advertise_address
 from vergent.core.app import App
+from vergent.core.config import Config
+from vergent.core.model.state import ServerState
+from vergent.core.p2p.manager import PeerManager
+from vergent.core.server import Server
 
 
 from vergent.core.types_ import GatewayProtocol
 from vergent.core.utils.log import setup_logging
+
+
+def _shutdown_p2p(state: ServerState, task: asyncio.Task[None]) -> None:
+    # todo(souls): move
+    state.tasks.discard(task)
+    state.stop_event.set()
 
 
 def run(
@@ -46,11 +54,11 @@ def run(
     if peers:
         peer_manager = PeerManager(
             peers=set(peers or []),
-            listen=advertise_address or f"{host}:{port}",
+            listen=get_advertise_address(),
             loop=loop
         )
         p2p_task = loop.create_task(peer_manager.manage(server.state.stop_event))
-        p2p_task.add_done_callback(server.state.tasks.discard)
+        p2p_task.add_done_callback(functools.partial(_shutdown_p2p, server.state))
         server.state.tasks.add(p2p_task)
 
     try:
@@ -63,7 +71,7 @@ def run(
             loop.close()
 
 
-def entrypoint(app: App):
+def entrypoint(app: App) -> None:
     args = get_cli_args()
     setup_logging(args.log_level)
 

@@ -7,13 +7,7 @@ from vergent.core.types_ import ReceiveEvent, SendEvent
 
 
 class App:
-    def __init__(
-        self,
-        advertise_address: str,
-        peers: set[str] | None = None,
-    ) -> None:
-        self.advertise_address = advertise_address
-        self.peers = peers
+    def __init__(self) -> None:
         self.router = Router()
         self._logger = logging.getLogger("vergent.core.app")
 
