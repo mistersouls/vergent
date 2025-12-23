@@ -58,7 +58,7 @@ async def main():
     response = await read_message(reader)
     print("← Received:", response)
 
-    writer.close()
+    # writer.close()
     await writer.wait_closed()
     print(time.time() - start)
 

@@ -9,6 +9,7 @@ from vergent.core.flow import FlowControl
 from vergent.core.model.event import Event
 from vergent.core.model.state import ServerState
 from vergent.core.types_ import GatewayProtocol
+from vergent.core.utils.addr import get_remote_addr
 
 
 class Protocol(asyncio.Protocol):
@@ -29,6 +30,7 @@ class Protocol(asyncio.Protocol):
         self._tasks = server_state.tasks
         self._buffer = bytearray()
         self._expected_length: int | None = None
+        self._client: tuple[str, int] | None = None
         self._logger = logging.getLogger("vergent.core.transport")
 
     def connection_made(self, transport: asyncio.Transport) -> None:
@@ -44,11 +46,15 @@ class Protocol(asyncio.Protocol):
         task.add_done_callback(self._tasks.discard)
         self._tasks.add(task)
 
-        self._logger.debug(f"Connection made: {self._transport}")
+        self._client = get_remote_addr(transport)
+        who = f"%s:%d" % self._client if self._client else ""
+        self._logger.debug(f"{who} - Connection made")
 
     def connection_lost(self, exc: Exception | None) -> None:
         self._connections.discard(self)
-        self._logger.debug(f"Connection lost: {self._transport}")
+
+        who = f"%s:%d" % self._client if self._client else "" # noqa
+        self._logger.debug(f"{who} - Connection lost.")
 
         if self._flow is not None:
             self._flow.resume_writing()
@@ -104,6 +110,9 @@ class Protocol(asyncio.Protocol):
 
     def resume_writing(self) -> None:
         self._flow.resume_writing()
+
+    def shutdown(self) -> None:
+        self._transport.close()
 
     def _decode_event(self, payload: bytes) -> Event | None:
         try:

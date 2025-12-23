@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import Callable
 
@@ -7,7 +8,13 @@ from vergent.core.types_ import ReceiveEvent, SendEvent
 
 
 class App:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        advertise_address: str,
+        peers: set[str] | None = None,
+    ) -> None:
+        self.advertise_address = advertise_address
+        self.peers = peers
         self.router = Router()
         self._logger = logging.getLogger("vergent.core.app")
 
@@ -34,3 +41,6 @@ class App:
 
     def request(self, event_type: str) -> Callable[[RouteHandler], RouteHandler]:
         return self.router.request(event_type)
+
+    async def start(self, stop: asyncio.Event):
+        ...

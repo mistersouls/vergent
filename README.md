@@ -34,7 +34,7 @@ To try it out:
 ```bash
 git clone https://github.com/mistersouls/vergent
 cd vergent
-python -m vergentdb
+python -m vergent --data-dir <DATA DIR>
 ```
 
 This starts a standalone instance with an embedded storage backend.
