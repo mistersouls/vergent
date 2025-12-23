@@ -1,4 +1,3 @@
-import asyncio
 import logging
 from typing import Callable
 
@@ -41,6 +40,3 @@ class App:
 
     def request(self, event_type: str) -> Callable[[RouteHandler], RouteHandler]:
         return self.router.request(event_type)
-
-    async def start(self, stop: asyncio.Event):
-        ...

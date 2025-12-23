@@ -140,9 +140,7 @@ class Cycle:
             await self._flow.drain()
 
         try:
-            payload = msgpack.packb(event.to_dict(), use_bin_type=True)
-            frame = struct.pack("!I", len(payload)) + payload
-            self._transport.write(frame)
+            self._transport.write(event.to_frame())
         except Exception as exc:
             self._logger.error(f"Failed to send event: {exc}")
             self._transport.close()

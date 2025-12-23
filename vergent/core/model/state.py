@@ -9,5 +9,6 @@ if TYPE_CHECKING:
 
 @dataclass
 class ServerState:
+    stop_event: asyncio.Event = field(default_factory=asyncio.Event)
     connections: set[Protocol] = field(default_factory=set)
     tasks: set[asyncio.Task[None]] = field(default_factory=set)

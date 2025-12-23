@@ -1,4 +1,3 @@
-import asyncio
 from typing import Protocol, Callable, Awaitable
 
 from vergent.core.model.event import Event
@@ -10,9 +9,6 @@ SendEvent = Callable[[Event], Awaitable[None]]
 
 class GatewayProtocol(Protocol):
     async def __call__(self, receive: ReceiveEvent, send: SendEvent) -> None:
-        ...
-
-    async def start(self, stop: asyncio.Event) -> None:
         ...
 
 

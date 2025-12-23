@@ -11,7 +11,6 @@ class Server:
     def __init__(self, config: Config) -> None:
         self._config = config
         self.state = ServerState()
-        self._stop_event = asyncio.Event()
         self._logger = logging.getLogger("vergent.core.server")
 
     def run(self) -> None:
@@ -20,7 +19,7 @@ class Server:
 
     async def serve(self) -> None:
         def graceful_exit(*_) -> None:
-            self._stop_event.set()
+            self.state.stop_event.set()
 
         with signal_handler(graceful_exit):
             await self._serve()
@@ -29,14 +28,12 @@ class Server:
         config = self._config
         host = config.host
         port = config.port
-        app = config.app
         server = await config.loop.create_server(
             self.create_protocol,
             host=host,
             port=port,
             backlog=config.backlog
         )
-        await app.start(self._stop_event)
         print(f"=========== Server started at '{host}:{port}' ==============")
 
         await self.loop_forever()
@@ -47,7 +44,7 @@ class Server:
         return Protocol(config=self._config, server_state=self.state, loop=loop)
 
     async def loop_forever(self) -> None:
-        await self._stop_event.wait()
+        await self.state.stop_event.wait()
 
     async def shutdown(self, server: asyncio.Server) -> None:
         server.close()
@@ -63,7 +60,7 @@ class Server:
         except asyncio.TimeoutError:
             self._logger.error(
                 f"Cancel {len(self.state.tasks)} running task(s), "
-                f"timeout graceful shutdown"
+                f"timeout graceful shutdown: {self.state.tasks}"
             )
             for task in self.state.tasks:
                 task.cancel("Task cancelled, timeout graceful shutdown exceeded")

@@ -30,5 +30,5 @@ async def get(data: dict) -> Event:
 
 
 @app.request("ping")
-async def ping() -> Event:
+async def ping(data: dict) -> Event:
     return Event(type="pong", payload={"from": "", "epoch": 0})
