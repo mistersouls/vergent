@@ -25,23 +25,74 @@ The goal of **Vergent** is to explore a new direction for distributed data: a le
 about while offering a practical balance between performance, safety, and simplicity. I want a system that embraces decentralization
 without sacrificing clarity, and that scales naturally across unreliable networks.
 
+---
 
-## Running locally (In progress)
+## Current Status
 
-For now, **Vergent** runs as a single local node so I can iterate quickly on the protocol and storage engine.
-To try it out:
+Vergent already includes:
+
+### A versioned local storage engine
+
+Based on hybrid logical clocks (HLC), last‑write‑wins semantics, and deterministic conflict resolution.
+
+### Asynchronous replication
+
+Every write (`put`/`delete`) is replicated to all peers using a simple, explicit event‑based protocol.
+
+### A gossip‑based membership layer
+
+Nodes exchange membership views, detect failures, and discover new peers automatically.
+The gossip layer is active but not yet exploited for anti‑entropy or repair — that will come next.
+
+### A minimal CLI client: `vergentctl`
+
+A lightweight interactive shell that lets you:
+
+- connect to a node
+- run `get`, `put`, `delete`
+- inspect values and HLC timestamps
+- observe replication in real time
+
+---
+
+## Running locally
+
+You can run a single node or multiple nodes on your machine.
+
+### Start a node
 
 ```bash
 git clone https://github.com/mistersouls/vergent
 cd vergent
-python -m vergent --data-dir <DATA DIR>
+python -m vergent --port 2003 --peers 127.0.0.1:2001 127.0.0.1:2002 --data-dir <DISTINCT DATA DIR FOR THIS NODE> --log-level DEBUG
 ```
 
-This starts a standalone instance with an embedded storage backend.
-You can then send simple requests (put/get/delete) using `client.py` with:
+This starts a node with:
+* an embedded storage backend
+* replication enabled
+* gossip membership enabled
+
+Start as many nodes as you want by changing the port and peer list.
+
+### Using the CLI (`vergentctl`)
+
+Vergent ships with a minimal interactive client:
 
 ```bash
-python client.py
+python -m vergentctl 127.0.0.1:2001
 ```
 
-A proper CLI and client library will come later as the project evolves.
+Example session:
+
+```bash
+vergent(127.0.0.1:2001)> put foo bar
+OK hlc=...
+
+vergent(127.0.0.1:2001)> get foo
+bar
+
+vergent(127.0.0.1:2001)> delete foo
+OK hlc=...
+```
+
+Writes are automatically replicated to all peers.
