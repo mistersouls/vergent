@@ -65,7 +65,7 @@ class PeerManager:
 
     async def ping_for_ever(self, stop: asyncio.Event) -> None:
         for peer in self._peers:
-            asyncio.create_task(self._ping_one(stop, peer))
+            asyncio.create_task(self._notify_one(stop, peer))
 
         event = Event(type="ping", payload={"source": self._listen})
         while not stop.is_set():
@@ -127,6 +127,9 @@ class PeerManager:
     def inject_incoming(self, event: Event) -> None:
         self._incoming.publish(event)
 
+    def inject_outgoing(self, event: Event) -> None:
+        self._outgoing.publish(event)
+
     def register_peer(self, stop: asyncio.Event, peer: str) -> None:
         self._logger.info(f"Discovered new peer via gossip: {peer}")
 
@@ -134,7 +137,7 @@ class PeerManager:
         self._detectors[peer] = FailureDetector()
 
         # Start ping loop for this peer
-        asyncio.create_task(self._ping_one(stop, peer))
+        asyncio.create_task(self._notify_one(stop, peer))
 
     def snapshot_view(self) -> Mapping[str, Mapping[str, Any]]:
         return self._view.snapshot()
@@ -194,7 +197,7 @@ class PeerManager:
             return None
         return random.choice(alive)
 
-    async def _ping_one(self, stop: asyncio.Event, address: str) -> None:
+    async def _notify_one(self, stop: asyncio.Event, address: str) -> None:
         async for event in self._outgoing:
             client = self._clients.get(address)
 
@@ -203,7 +206,7 @@ class PeerManager:
                 break
 
             await client.send(event)
-            self._logger.debug(f"Sent ping to {address}")
+            self._logger.debug(f"Notified event type={event.type} to {address}")
 
     def _pong(self, peer: str | None) -> None:
         if peer not in self._detectors:

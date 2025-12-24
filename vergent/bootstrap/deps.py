@@ -3,6 +3,7 @@ from functools import lru_cache
 
 from vergent.core.app import App
 from vergent.core.p2p.manager import PeerManager
+from vergent.core.p2p.versionned import VersionedStorage
 from vergent.core.storage import LMDBStorage
 from pathlib import Path
 
@@ -14,6 +15,12 @@ def get_storage() -> Storage:
     args = get_cli_args()
     data_dir = Path(args.data_dir)
     return LMDBStorage(str(data_dir))
+
+
+@lru_cache
+def get_versioned_storage() -> VersionedStorage:
+    backend = get_storage()
+    return VersionedStorage(backend, get_advertise_address())
 
 
 @lru_cache
