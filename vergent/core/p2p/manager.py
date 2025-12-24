@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import math
+import random
+from typing import Mapping, Any
 
 from vergent.core.model.event import Event
 from vergent.core.p2p.client import PeerClientPool
@@ -14,16 +16,14 @@ class PeerManager:
         self,
         listen: str,
         peers: set[str],
-        loop: asyncio.AbstractEventLoop,
     ) -> None:
         self._listen = listen
         self._peers = set(peers)
-        self._loop = loop
+        self._loop = asyncio.get_event_loop()
 
-        self._outgoing: Subscription[Event | None] = Subscription(loop)
-        self._incoming: Subscription[Event | None] = Subscription(loop)
-        self._clients = PeerClientPool(self._incoming, loop)
-        self._tasks: list[asyncio.Task[None]] = []
+        self._outgoing: Subscription[Event | None] = Subscription(self._loop)
+        self._incoming: Subscription[Event | None] = Subscription(self._loop)
+        self._clients = PeerClientPool(self._incoming, self._loop)
 
         self._detectors: dict[str, FailureDetector] = {
             peer: FailureDetector()
@@ -40,6 +40,7 @@ class PeerManager:
             asyncio.create_task(self.ping_for_ever(stop)),
             asyncio.create_task(self.listen_peers(stop)),
             asyncio.create_task(self.health_check_peers(stop)),
+            asyncio.create_task(self.gossip_forever(stop)),
             asyncio.create_task(stop.wait()),
         ]
         self._logger.info(f"Started regular ping: {sorted(self._peers)}")
@@ -63,23 +64,21 @@ class PeerManager:
         self._logger.info("Shutdown complete")
 
     async def ping_for_ever(self, stop: asyncio.Event) -> None:
-        tasks = [
+        for peer in self._peers:
             asyncio.create_task(self._ping_one(stop, peer))
-            for peer in self._peers
-        ]
-        self._tasks.extend(tasks)
 
         event = Event(type="ping", payload={"source": self._listen})
         while not stop.is_set():
-            await asyncio.sleep(2)
-            self._outgoing.publish(event)
+            await asyncio.sleep(2)  # to review
+            if self._peers:
+                self._outgoing.publish(event)
 
     async def listen_peers(self, stop: asyncio.Event) -> None:
         async for event in self._incoming:
             if stop.is_set() or event is None:
                 break
 
-            await self._handle_event(event)
+            await self._handle_event(stop, event)
 
     async def health_check_peers(self, stop: asyncio.Event) -> None:
         interval = 5.0  # to review
@@ -111,11 +110,89 @@ class PeerManager:
                     self._view.set_alive(peer)
                     self._logger.info(f"Peer {peer} -> alive (φ={phi:.2f})")
 
-    async def _handle_event(self, event: Event) -> None:
+    async def gossip_forever(self, stop: asyncio.Event) -> None:
+        while not stop.is_set():
+            await asyncio.sleep(3)  # to review
+
+            peer = self._choose_random_alive_peer()
+            if peer is None:
+                continue
+
+            payload = {"source": self._listen, "membership": self._view.snapshot()}
+            event = Event(type="gossip", payload=payload)
+            client = self._clients.get(peer)
+            await client.send(event)
+            self._logger.debug(f"Sent gossip membership to {peer}")
+
+    def inject_incoming(self, event: Event) -> None:
+        self._incoming.publish(event)
+
+    def register_peer(self, stop: asyncio.Event, peer: str) -> None:
+        self._logger.info(f"Discovered new peer via gossip: {peer}")
+
+        self._peers.add(peer)
+        self._detectors[peer] = FailureDetector()
+
+        # Start ping loop for this peer
+        asyncio.create_task(self._ping_one(stop, peer))
+
+    def snapshot_view(self) -> Mapping[str, Mapping[str, Any]]:
+        return self._view.snapshot()
+
+    async def _handle_event(self, stop: asyncio.Event, event: Event) -> None:
         match event.type:
             case "pong":
                 peer = event.payload.get("from")
                 self._pong(peer)
+            case "gossip":
+                self._apply_gossip(stop, event.payload)
+
+    def _apply_gossip(self, stop: asyncio.Event, payload: Mapping[str, Any]) -> None:
+        """
+        Apply a received gossip membership payload to the local view.
+        """
+        membership = payload.get("membership") or {}
+        remote_node = payload.get("source")
+
+        if not membership or remote_node is None:
+            return
+
+        # 1. Build a clean remote view
+        remote_view = self._build_remote_view(remote_node, membership)
+
+        # 2. Register new peers discovered in the gossip
+        for peer in remote_view.all_peers():
+            if peer != self._listen and peer not in self._peers:
+                self.register_peer(stop, peer)
+
+        # 3. Merge remote membership into local membership
+        self._view.merge(remote_view)
+        self._logger.debug(f"Merged membership from {remote_node}, {len(membership)} entries")
+
+    @staticmethod
+    def _build_remote_view(
+        remote_node: str,
+        membership: Mapping[str, Mapping[str, Any]]
+    ) -> MembershipView:
+        remote_peers = set(membership.keys())
+        remote_view = MembershipView(node=remote_node, initial_peers=remote_peers)
+
+        for peer, data in membership.items():
+            entry = remote_view.get(peer)
+            entry.status = data["status"]
+            entry.epoch = data["epoch"]
+
+        return remote_view
+
+    def _choose_random_alive_peer(self) -> str | None:
+        alive = [
+            peer
+            for peer in self._view.alive_peers()
+            if peer != self._listen
+        ]
+        if not alive:
+            return None
+        return random.choice(alive)
 
     async def _ping_one(self, stop: asyncio.Event, address: str) -> None:
         async for event in self._outgoing:

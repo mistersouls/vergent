@@ -1,11 +1,10 @@
 import asyncio
 import functools
 
-from vergent.bootstrap.deps import get_cli_args, get_advertise_address
+from vergent.bootstrap.deps import get_cli_args, get_peer_manager
 from vergent.core.app import App
 from vergent.core.config import Config
 from vergent.core.model.state import ServerState
-from vergent.core.p2p.manager import PeerManager
 from vergent.core.server import Server
 
 
@@ -31,10 +30,10 @@ def run(
     max_buffer_size: int = 4 * 1024 * 1024,  # 4MB
     max_message_size: int = 1 * 1024 * 1024, # 1MB
     loop: asyncio.AbstractEventLoop | None = None,
-    peers: list[str] = None
 ):
     if loop is None:
         loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 
     config = Config(
         app=app,
@@ -50,16 +49,10 @@ def run(
     )
     server = Server(config=config)
 
-    peers = set(peers or [])
-    if peers:
-        peer_manager = PeerManager(
-            peers=set(peers or []),
-            listen=get_advertise_address(),
-            loop=loop
-        )
-        p2p_task = loop.create_task(peer_manager.manage(server.state.stop_event))
-        p2p_task.add_done_callback(functools.partial(_shutdown_p2p, server.state))
-        server.state.tasks.add(p2p_task)
+    peer_manager = get_peer_manager()
+    p2p_task = loop.create_task(peer_manager.manage(server.state.stop_event))
+    p2p_task.add_done_callback(functools.partial(_shutdown_p2p, server.state))
+    server.state.tasks.add(p2p_task)
 
     try:
         server.run()
@@ -85,5 +78,4 @@ def entrypoint(app: App) -> None:
         limit_concurrency=args.limit_concurrency,
         max_buffer_size=args.max_buffer_size,
         max_message_size=args.max_message_size,
-        peers=args.peers
     )

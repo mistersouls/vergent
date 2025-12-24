@@ -72,3 +72,25 @@ class MembershipView:
             if other_entry.epoch > local_entry.epoch:
                 local_entry.status = other_entry.status
                 local_entry.epoch = other_entry.epoch
+
+    def snapshot(self) -> dict[str, dict[str, object]]:
+        """
+        Return an immutable snapshot of the membership table.
+        Format:
+            {
+                peer: {
+                    "address": str,
+                    "status": "alive" | "suspect" | "dead",
+                    "epoch": int,
+                },
+                ...
+            }
+        """
+        return {
+            peer: {
+                "address": entry.address,
+                "status": entry.status,
+                "epoch": entry.epoch,
+            }
+            for peer, entry in self._entries.items()
+        }

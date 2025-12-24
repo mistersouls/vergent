@@ -2,6 +2,7 @@ import argparse
 from functools import lru_cache
 
 from vergent.core.app import App
+from vergent.core.p2p.manager import PeerManager
 from vergent.core.storage import LMDBStorage
 from pathlib import Path
 
@@ -27,6 +28,17 @@ def get_advertise_address() -> str:
     if args.advertise_address:
         return args.advertise_address
     return f"{args.host}:{args.port}"
+
+
+@lru_cache
+def get_peer_manager() -> PeerManager:
+    args = get_cli_args()
+    peers = set(args.peers or [])
+    peer_manager = PeerManager(
+        peers=peers,
+        listen=get_advertise_address(),
+    )
+    return peer_manager
 
 
 @lru_cache
