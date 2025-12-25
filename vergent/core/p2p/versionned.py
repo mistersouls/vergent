@@ -1,3 +1,5 @@
+from typing import AsyncIterator, Mapping, Any
+
 import msgpack
 
 from vergent.core.p2p.conflict import ValueVersion, ConflictResolver
@@ -33,6 +35,19 @@ class VersionedStorage:
     async def delete(self, key: str) -> None:
         await self.delete_local(key)
 
+    async def iter(self, limit: int = -1, batch_size: int = 1024) -> AsyncIterator[tuple[str, bytes]]:
+        async for key, version in self.iter_versions(limit=limit, batch_size=batch_size):
+            if not version.is_tombstone:
+                yield key, version.value
+
+    async def compute_digest(self, batch_size: int = 1024) -> Mapping[str, Mapping[str, Any]]:
+        digest:dict[str, dict[str, Any]] = {}
+
+        async for key, version in self.iter_versions(batch_size=batch_size):
+            digest[key] = version.hlc.to_dict()
+
+        return digest
+
     async def get_version(self, key: str) -> ValueVersion | None:
         if raw := await self._backend.get(key):
             return ValueVersion.from_dict(msgpack.unpackb(raw, raw=False))
@@ -49,6 +64,11 @@ class VersionedStorage:
         version = ValueVersion.tombstone(ts, origin=self._node_id)
         await self._backend.put(key, msgpack.packb(version.to_dict()))
         return version
+
+    async def iter_versions(self, limit: int = -1, batch_size: int = 1024) -> AsyncIterator[tuple[str, ValueVersion]]:
+        async for key, raw in self._backend.iter(limit=limit, batch_size=batch_size):
+            version = ValueVersion.from_dict(msgpack.unpackb(raw, raw=False))
+            yield key, version
 
     async def apply_remote_version(self, key: str, remote: ValueVersion) -> ValueVersion:
         # Advance local HLC based on remote timestamp

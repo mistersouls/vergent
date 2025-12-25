@@ -1,4 +1,4 @@
-from typing import Protocol, Callable, Awaitable
+from typing import Protocol, Callable, Awaitable, AsyncIterator
 
 from vergent.core.model.event import Event
 
@@ -21,3 +21,7 @@ class Storage(Protocol):
 
     async def delete(self, key: str) -> None:
         ...
+
+    def iter(self, limit: int = -1, batch_size: int = 1024) -> AsyncIterator[tuple[str, bytes]]:
+        ...
+

@@ -6,7 +6,10 @@ from typing import Mapping, Any
 
 from vergent.core.model.event import Event
 from vergent.core.p2p.client import PeerClientPool
+from vergent.core.p2p.conflict import ValueVersion
+from vergent.core.p2p.hlc import HLC
 from vergent.core.p2p.phi import FailureDetector
+from vergent.core.p2p.versionned import VersionedStorage
 from vergent.core.p2p.view import MembershipView
 from vergent.core.sub import Subscription
 
@@ -16,9 +19,11 @@ class PeerManager:
         self,
         listen: str,
         peers: set[str],
+        storage: VersionedStorage
     ) -> None:
         self._listen = listen
         self._peers = set(peers)
+        self._storage = storage
         self._loop = asyncio.get_event_loop()
 
         self._outgoing: Subscription[Event | None] = Subscription(self._loop)
@@ -29,8 +34,11 @@ class PeerManager:
             peer: FailureDetector()
             for peer in self._peers
         }
-
         self._view = MembershipView(listen, self._peers | {listen})
+
+        self._sync_locks: dict[str, asyncio.Lock] = {
+            peer: asyncio.Lock() for peer in self._peers
+        }
 
         self._logger = logging.getLogger("vergent.core.peering")
 
@@ -108,6 +116,7 @@ class PeerManager:
                 # Transition: suspect/dead → alive
                 elif entry.status in ("suspect", "dead") and not suspect:
                     self._view.set_alive(peer)
+                    await self._trigger_sync(peer)
                     self._logger.info(f"Peer {peer} -> alive (φ={phi:.2f})")
 
     async def gossip_forever(self, stop: asyncio.Event) -> None:
@@ -139,6 +148,10 @@ class PeerManager:
         # Start ping loop for this peer
         asyncio.create_task(self._notify_one(stop, peer))
 
+        # Sync with this peer
+        self._sync_locks[peer] = asyncio.Lock()
+        asyncio.create_task(self._trigger_sync(peer))
+
     def snapshot_view(self) -> Mapping[str, Mapping[str, Any]]:
         return self._view.snapshot()
 
@@ -149,6 +162,10 @@ class PeerManager:
                 self._pong(peer)
             case "gossip":
                 self._apply_gossip(stop, event.payload)
+            case "sync/digest":
+                await self._handle_sync_digest(event)
+            case "sync/fetch":
+                await self._handle_sync_fetch(event)
 
     def _apply_gossip(self, stop: asyncio.Event, payload: Mapping[str, Any]) -> None:
         """
@@ -197,16 +214,86 @@ class PeerManager:
             return None
         return random.choice(alive)
 
-    async def _notify_one(self, stop: asyncio.Event, address: str) -> None:
-        async for event in self._outgoing:
-            client = self._clients.get(address)
+    async def _handle_sync_digest(self, event: Event):
+        remote_digest = event.payload["digest"]
+        remote = event.payload["source"]
 
+        local_digest = await self._storage.compute_digest()
+
+        keys_to_fetch = []
+
+        for key, remote_hlc_dict in remote_digest.items():
+            remote_hlc = HLC.from_dict(remote_hlc_dict)
+
+            local_hlc_dict = local_digest.get(key)
+            if local_hlc_dict is None:
+                keys_to_fetch.append(key)
+                continue
+
+            local_hlc = HLC.from_dict(dict(local_hlc_dict))
+
+            if remote_hlc > local_hlc:
+                keys_to_fetch.append(key)
+
+        if not keys_to_fetch:
+            self._logger.info(f"No divergence with {remote}")
+            return
+
+        fetch_event = Event(
+            type="sync",
+            payload={"kind": "fetch", "keys": keys_to_fetch},
+        )
+        client = self._clients.get(remote)
+        await client.send(fetch_event)
+
+        self._logger.info(f"Requested {len(keys_to_fetch)} keys from {remote}")
+
+    async def _handle_sync_fetch(self, event: Event) -> None:
+        remote = event.payload["source"]
+        versions = event.payload["versions"]
+
+        count = 0
+        for key, vdict in versions.items():
+            version = ValueVersion.from_dict(vdict)
+            await self._storage.apply_remote_version(key, version)
+            count += 1
+
+        self._logger.info(f"Applied {count} versions from {remote}")
+
+    async def _notify_one(self, stop: asyncio.Event, address: str) -> None:
+
+        client = self._clients.get(address)
+        pending: dict[str, Event] = {}
+
+        async for event in self._outgoing:
             if stop.is_set() or event is None:
+                self._logger.info(f"Stopping notify loop for peer {address}")
                 await client.close()
                 break
 
-            await client.send(event)
-            self._logger.debug(f"Notified event type={event.type} to {address}")
+            pending[event.type] = event
+
+            # Try to flush all pending events (one per type)
+            to_remove = []
+
+            for etype, ev in pending.items():
+                try:
+                    # to review timeout value
+                    await asyncio.wait_for(client.send(ev), timeout=0.2)
+                    self._logger.debug(f"Notified event type={etype} to {address}")
+                    to_remove.append(etype)
+                except asyncio.TimeoutError:
+                    self._logger.warning(
+                        f"Timeout sending {etype} to {address}; "
+                        f"peer may be down, keeping event pending"
+                    )
+
+            # Remove successfully sent events
+            for etype in to_remove:
+                del pending[etype]
+
+            # Yield point to avoid hot loop
+            await asyncio.sleep(0)
 
     def _pong(self, peer: str | None) -> None:
         if peer not in self._detectors:
@@ -226,5 +313,22 @@ class PeerManager:
         # Transition dead -> alive
         if entry.status in ("suspect", "dead"):
             self._view.set_alive(peer)
+            asyncio.create_task(self._trigger_sync(peer))
             phi = detector.compute_phi(now)
             self._logger.info(f"Peer {peer} is now alive (φ={phi:.2f})")
+
+    async def _trigger_sync(self, peer: str) -> None:
+        lock = self._sync_locks.get(peer)
+        if lock is None:
+            return
+
+        if lock.locked():
+            self._logger.debug(f"Sync already running for {peer}, skipping")
+            return
+
+        async with lock:
+            self._logger.info(f"Starting sync with {peer}")
+            event = Event(type="sync", payload={"kind": "digest"})
+            client = self._clients.get(peer)
+            await client.send(event)
+            self._logger.info(f"Sync request sent to {peer}")

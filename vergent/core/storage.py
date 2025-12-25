@@ -1,10 +1,13 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from typing import AsyncIterator
 
 import lmdb
 
+from vergent.core.types_ import Storage
 
-class LMDBStorage:
+
+class LMDBStorage(Storage):
     def __init__(
         self,
         path: str,
@@ -51,6 +54,44 @@ class LMDBStorage:
             key.encode(),
         )
 
+    async def iter(self, limit: int = -1, batch_size: int = 1024) -> AsyncIterator[tuple[str, bytes]]:
+        """
+        Asynchronously iterate over all key/value pairs in LMDB.
+
+        - batch_size: number of entries to fetch per LMDB transaction
+        - limit: max number of entries to return (-1 = no limit)
+
+        This is scalable and LMDB‑safe:
+        - LMDB scan happens entirely inside the threadpool
+        - no transaction or cursor crosses thread boundaries
+        - async yields happen outside LMDB
+        """
+        loop = asyncio.get_running_loop()
+        start_key = None
+
+        remaining = limit if limit != -1 else None
+
+        while True:
+            # Fetch one batch inside LMDB thread
+            batch: list[tuple[bytes, bytes]] = await loop.run_in_executor(
+                self._executor, self._sync_iter, start_key, batch_size
+            )
+
+            if not batch:
+                break
+
+            # Yield results asynchronously
+            for key, value in batch:
+                yield key.decode(), value
+
+                if remaining is not None:
+                    remaining -= 1
+                    if remaining <= 0:
+                        return
+
+            start_key = batch[-1][0] + b"\x00"
+
+
     def _sync_get(self, key: bytes) -> bytes | None:
         with self._env.begin(write=False) as txn:
             return txn.get(key)
@@ -62,3 +103,24 @@ class LMDBStorage:
     def _sync_delete(self, key: bytes) -> None:
         with self._env.begin(write=True) as txn:
             txn.delete(key)
+
+    def _sync_iter(self, start_key: bytes | None, limit: int) -> list[tuple[bytes, bytes]]:
+        """
+        Scan at most `limit` keys starting from `start_key`.
+
+        Runs entirely inside the LMDB thread (safe).
+        """
+        items = []
+
+        with self._env.begin(write=False) as txn:
+            with txn.cursor() as cursor:
+                if start_key is None:
+                    has_key = cursor.first()
+                else:
+                    has_key = cursor.set_range(start_key)
+
+                while has_key and len(items) < limit:
+                    items.append((cursor.key(), cursor.value()))
+                    has_key = cursor.next()
+
+        return items

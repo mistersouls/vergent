@@ -69,3 +69,31 @@ async def replicate(data: dict) -> Event:
     version = ValueVersion.from_dict(data["version"])
     await storage.apply_remote_version(key, version)
     return Event(type="ok", payload={"hlc": version.hlc.to_dict(), "source": get_advertise_address()})
+
+
+@app.request("sync")
+async def sync(data: dict) -> Event:
+    storage = get_versioned_storage()
+    kind = data["kind"]
+    match kind:
+        case "digest":
+            digest = await storage.compute_digest()
+            return Event(type="sync/digest", payload={
+                "digest": digest,
+                "source": get_advertise_address(),
+            })
+        case "fetch":
+            keys = data.get("keys", [])
+            versions = {}
+
+            for key in keys:
+                v = await storage.get_version(key)
+                if v is not None:
+                    versions[key] = v.to_dict()
+
+            return Event(type="sync/fetch", payload={
+                "versions": versions,
+                "source": get_advertise_address(),
+            })
+        case _:
+            return Event(type="error", payload={"message": f"Unknow kind sync {kind}"})

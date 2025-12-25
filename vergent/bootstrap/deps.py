@@ -44,6 +44,7 @@ def get_peer_manager() -> PeerManager:
     peer_manager = PeerManager(
         peers=peers,
         listen=get_advertise_address(),
+        storage=get_versioned_storage()
     )
     return peer_manager
 
