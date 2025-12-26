@@ -1,4 +1,6 @@
 import argparse
+import os
+import ssl
 from functools import lru_cache
 
 from vergent.core.app import App
@@ -44,9 +46,34 @@ def get_peer_manager() -> PeerManager:
     peer_manager = PeerManager(
         peers=peers,
         listen=get_advertise_address(),
-        storage=get_versioned_storage()
+        storage=get_versioned_storage(),
+        ssl_ctx=get_client_ssl_ctx(),
     )
     return peer_manager
+
+
+@lru_cache
+def get_server_ssl_ctx() -> ssl.SSLContext:
+    args = get_cli_args()
+
+    ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    ctx.load_cert_chain(certfile=args.tls_certfile, keyfile=args.tls_keyfile)
+    ctx.verify_mode = ssl.CERT_REQUIRED
+    ctx.load_verify_locations(cafile=args.tls_cafile)
+
+    return ctx
+
+
+@lru_cache
+def get_client_ssl_ctx() -> ssl.SSLContext:
+    args = get_cli_args()
+
+    ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+    ctx.load_cert_chain(certfile=args.tls_certfile, keyfile=args.tls_keyfile)
+    ctx.verify_mode = ssl.CERT_REQUIRED
+    ctx.load_verify_locations(cafile=args.tls_cafile)
+
+    return ctx
 
 
 @lru_cache
@@ -120,6 +147,38 @@ def get_cli_args() -> argparse.Namespace:
             " --data-dir /var/lib/vergent/node1\n"
             " --data-dir /mnt/ssd/vergent"
         )
+    )
+
+    parser.add_argument(
+        "--tls-certfile",
+        type=str,
+        required=True,
+        help=(
+            "Path to the node's TLS certificate (PEM).\n"
+            "Vergent uses mandatory mutual TLS (mTLS): all traffic between nodes is "
+            "encrypted and authenticated.\n"
+        ),
+    )
+
+    parser.add_argument(
+        "--tls-keyfile",
+        type=str,
+        required=True,
+        help=(
+            "Path to the node's TLS private key (PEM).\n"
+            "Required for mTLS: the node proves its identity using this key.\n"
+        ),
+    )
+
+    parser.add_argument(
+        "--tls-cafile",
+        type=str,
+        required=True,
+        help=(
+            "Path to the CA certificate (PEM) used to verify peer node certificates.\n"
+            "Vergent enforces mutual TLS (mTLS): nodes must present a certificate "
+            "signed by this CA. Connections without valid certificates are rejected.\n"
+        ),
     )
 
     parser.add_argument(
@@ -214,4 +273,15 @@ def get_cli_args() -> argparse.Namespace:
         ),
     )
 
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    for name, path in [
+        ("--tls-certfile", args.tls_certfile),
+        ("--tls-keyfile", args.tls_keyfile),
+        ("--tls-cafile", args.tls_cafile)
+    ]:
+        if not os.path.isfile(path):
+            print(f"{name} does not exist or is not a file: {path}")
+            exit(1)
+
+    return args

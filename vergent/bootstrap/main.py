@@ -45,7 +45,7 @@ def run(
         limit_concurrency=limit_concurrency,
         max_buffer_size=max_buffer_size,
         max_message_size=max_message_size,
-        loop=loop,
+        loop=loop
     )
     server = Server(config=config)
 
@@ -77,5 +77,5 @@ def entrypoint(app: App) -> None:
         advertise_address=args.advertise_address,
         limit_concurrency=args.limit_concurrency,
         max_buffer_size=args.max_buffer_size,
-        max_message_size=args.max_message_size,
+        max_message_size=args.max_message_size
     )

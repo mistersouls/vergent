@@ -22,7 +22,6 @@ async def cmd_get(reader, writer, args: str):
 
     key = validate_key(parts[0])
     event = Event("get", {"key": key})
-    print(event)
     return await rpc_call(reader, writer, event)
 
 
@@ -48,7 +47,6 @@ async def cmd_put(reader, writer, args: str):
     key = validate_key(key)
     value = parse_value(value_str)
     event = Event("put", {"key": key, "value": value})
-    print(event)
     return await rpc_call(reader, writer, event)
 
 
@@ -62,5 +60,4 @@ async def cmd_delete(reader, writer, args: str):
 
     key = validate_key(parts[0])
     event = Event("delete", {"key": key})
-    print(event)
     return await rpc_call(reader, writer, event)

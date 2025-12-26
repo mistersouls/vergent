@@ -1,3 +1,4 @@
+import msgpack
 
 from vergent.bootstrap.deps import get_app, get_advertise_address, get_peer_manager, get_versioned_storage
 
@@ -11,7 +12,10 @@ app = get_app()
 async def get(data: dict) -> Event:
     storage = get_versioned_storage()
     res = await storage.get(data["key"])
-    value = res.decode() if res else None
+    if res is not None:
+        value = msgpack.unpackb(res, raw=False)
+    else:
+        value = None
     return Event(type="ok", payload={"content": value})
 
 
@@ -20,7 +24,8 @@ async def put(data: dict) -> Event:
     storage = get_versioned_storage()
     peer_manager = get_peer_manager()
     key = data["key"]
-    version = await storage.put_local(key, data["value"].encode())
+    value = msgpack.packb(data["value"], use_bin_type=True)
+    version = await storage.put_local(key, value)
     replication = Event(
         type="replicate",
         payload={

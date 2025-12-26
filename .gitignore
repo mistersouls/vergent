@@ -1,5 +1,6 @@
 # Generated
 db/
+.certs/
 __pycache__/
 *.py[cod]
 *$py.class

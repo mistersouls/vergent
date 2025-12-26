@@ -1,6 +1,7 @@
 import asyncio
 import logging
 
+from vergent.bootstrap.deps import get_server_ssl_ctx
 from vergent.core.config import Config
 from vergent.core.model.state import ServerState
 from vergent.core.protocol import Protocol
@@ -28,11 +29,13 @@ class Server:
         config = self._config
         host = config.host
         port = config.port
+
         server = await config.loop.create_server(
             self.create_protocol,
             host=host,
             port=port,
-            backlog=config.backlog
+            backlog=config.backlog,
+            ssl=get_server_ssl_ctx()
         )
         print(f"=========== Server started at '{host}:{port}' ==============")
 

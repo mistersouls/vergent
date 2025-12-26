@@ -2,6 +2,7 @@ import asyncio
 import logging
 import math
 import random
+import ssl
 from typing import Mapping, Any
 
 from vergent.core.model.event import Event
@@ -19,16 +20,18 @@ class PeerManager:
         self,
         listen: str,
         peers: set[str],
-        storage: VersionedStorage
+        storage: VersionedStorage,
+        ssl_ctx: ssl.SSLContext
     ) -> None:
         self._listen = listen
         self._peers = set(peers)
         self._storage = storage
+        self._ssl_ctx = ssl_ctx
         self._loop = asyncio.get_event_loop()
 
         self._outgoing: Subscription[Event | None] = Subscription(self._loop)
         self._incoming: Subscription[Event | None] = Subscription(self._loop)
-        self._clients = PeerClientPool(self._incoming, self._loop)
+        self._clients = PeerClientPool(self._incoming, self._ssl_ctx, self._loop)
 
         self._detectors: dict[str, FailureDetector] = {
             peer: FailureDetector()

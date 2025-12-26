@@ -1,9 +1,18 @@
 import asyncio
+import ssl
+
 from vergentctl.commands import COMMANDS
 
 
-async def repl(host: str, port: int) -> None:
-    reader, writer = await asyncio.open_connection(host, port)
+async def repl(host: str, port: int, certfile: str, keyfile: str, cafile: str) -> None:
+    ssl_ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+    ssl_ctx.load_cert_chain(certfile=certfile, keyfile=keyfile)
+    ssl_ctx.verify_mode = ssl.CERT_REQUIRED
+    ssl_ctx.load_verify_locations(cafile=cafile)
+
+    reader, writer = await asyncio.open_connection(
+        host, port, ssl=ssl_ctx
+    )
 
     print(f"Connected to vergent node at {host}:{port}")
     prompt = f"vergent({host}:{port})> "

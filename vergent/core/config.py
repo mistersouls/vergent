@@ -1,4 +1,5 @@
 import asyncio
+import ssl
 from dataclasses import dataclass
 
 from vergent.core.types_ import GatewayProtocol

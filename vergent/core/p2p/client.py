@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import ssl
 import struct
 
 import msgpack
@@ -13,10 +14,12 @@ class PeerClient:
     def __init__(
         self,
         address: str,
+        ssl_ctx: ssl.SSLContext,
         subscription: Subscription[Event | None],
         loop: asyncio.AbstractEventLoop
     ) -> None:
         self._address = address
+        self._ssl_ctx = ssl_ctx
         self._subscription = subscription
         self._loop = loop
 
@@ -32,7 +35,12 @@ class PeerClient:
         while not self.connected:
             try:
                 host, port = self._address.split(":")
-                self._reader, self._writer = await asyncio.open_connection(host, int(port))
+                self._reader, self._writer = await asyncio.open_connection(
+                    host=host,
+                    port=int(port),
+                    ssl=self._ssl_ctx,
+                    server_hostname=None
+                )
                 self.connected = True
                 if self._receive_task:
                     self._receive_task.cancel()
@@ -89,15 +97,17 @@ class PeerClientPool:
     def __init__(
         self,
         subscription: Subscription[Event | None],
+        ssl_ctx: ssl.SSLContext,
         loop: asyncio.AbstractEventLoop
     ) -> None:
         self._subscription = subscription
+        self._ssl_ctx = ssl_ctx
         self._loop = loop
         self.clients: dict[str, PeerClient] = {}
 
     def get(self, address) -> PeerClient:
         if address not in self.clients:
-            self.clients[address] = PeerClient(address, self._subscription, self._loop)
+            self.clients[address] = PeerClient(address, self._ssl_ctx, self._subscription, self._loop)
         return self.clients[address]
 
     async def close(self) -> None:

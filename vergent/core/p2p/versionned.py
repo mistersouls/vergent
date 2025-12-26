@@ -56,13 +56,13 @@ class VersionedStorage:
     async def put_local(self, key: str, value: bytes) -> ValueVersion:
         ts = self._hlc = self._hlc.tick_local()
         version = ValueVersion.from_bytes(value, ts, origin=self._node_id)
-        await self._backend.put(key, msgpack.packb(version.to_dict()))
+        await self._backend.put(key, msgpack.packb(version.to_dict(), use_bin_type=True))
         return version
 
     async def delete_local(self, key: str) -> ValueVersion:
         ts = self._hlc = self._hlc.tick_local()
         version = ValueVersion.tombstone(ts, origin=self._node_id)
-        await self._backend.put(key, msgpack.packb(version.to_dict()))
+        await self._backend.put(key, msgpack.packb(version.to_dict(), use_bin_type=True))
         return version
 
     async def iter_versions(self, limit: int = -1, batch_size: int = 1024) -> AsyncIterator[tuple[str, ValueVersion]]:
@@ -79,6 +79,6 @@ class VersionedStorage:
         winner = ConflictResolver.resolve(candidates)
 
         if winner != local:
-            await self._backend.put(key, msgpack.packb(winner.to_dict()))
+            await self._backend.put(key, msgpack.packb(winner.to_dict(), use_bin_type=True))
 
         return winner
