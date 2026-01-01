@@ -1,10 +1,12 @@
 import asyncio
 
+from vergent.bootstrap.config.loader import get_cli_args
 from vergent.bootstrap.deps import get_core
 from vergent.bootstrap.pkg import scan
 from vergent.core.config import Config
 from vergent.core.model.state import ServerState
 from vergent.core.server import Server
+from vergent.core.utils.log import setup_logging
 
 
 def _shutdown_p2p(state: ServerState, task: asyncio.Task[None]) -> None:
@@ -42,5 +44,8 @@ def run(
 
 @scan("vergent.bootstrap.handlers")
 def entrypoint() -> None:
+    cli = get_cli_args()
     core = get_core()
+
+    setup_logging(cli.log_level)
     run(config=core.config, loop=core.loop)

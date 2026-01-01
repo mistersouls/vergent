@@ -49,7 +49,7 @@ class NodeSettings(BaseSettings):
     @classmethod
     def parse_size(cls, v):
         if isinstance(v, str):
-            return SizeClass[v]  # convertit "L" → SizeClass.L
+            return SizeClass[v]  # converts "L" → SizeClass.L
         return v
 
 

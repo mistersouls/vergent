@@ -12,10 +12,15 @@ class PlacementStrategy:
         - rebalance planning
     """
 
-    def __init__(self, ring: Ring, partitioner: Partitioner, rf: int = 3):
+    def __init__(
+        self,
+        ring: Ring,
+        partitioner: Partitioner,
+        replication_factor: int = 3
+    ) -> None:
         self._ring = ring
         self._partitioner = partitioner
-        self._rf = rf
+        self._replication_factor = replication_factor
 
     def find_partition_by_key(self, key: bytes) -> LogicalPartition:
         token = HashSpace.hash(key)
@@ -34,35 +39,8 @@ class PlacementStrategy:
         replicas = [vnode]
 
         idx = self._ring.index_of(vnode)
-        for _ in range(1, self._rf):
+        for _ in range(1, self._replication_factor):
             idx = (idx + 1) % len(self._ring)
             replicas.append(self._ring[idx])
 
         return replicas
-
-    # ------------------------------------------------------------
-    # Rebalance planning
-    # ------------------------------------------------------------
-
-    def rebalance_plan(self, new_ring: Ring) -> list[dict]:
-        """
-        Compute a migration plan between the current ring and a new ring.
-        Returns a list of migration operations:
-            { partition, from_node, to_node }
-        """
-        plan = []
-
-        for pid in range(self._partitioner.total_partitions):
-            partition = self._partitioner.partition_for_pid(pid)
-
-            old_owner = self._ring.find_successor(partition.end).node_id
-            new_owner = new_ring.find_successor(partition.end).node_id
-
-            if old_owner != new_owner:
-                plan.append({
-                    "partition": partition,
-                    "from": old_owner,
-                    "to": new_owner,
-                })
-
-        return plan
