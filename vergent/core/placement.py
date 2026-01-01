@@ -30,17 +30,3 @@ class PlacementStrategy:
     def find_vnode_by_partition(self, partition: LogicalPartition) -> VNode:
         vnode = self._ring.find_successor(partition.end)
         return vnode
-
-    def preference_list(self, partition: LogicalPartition) -> list[VNode]:
-        """
-        Return RF distinct vnodes responsible for this partition.
-        """
-        vnode = self._ring.find_successor(partition.end)
-        replicas = [vnode]
-
-        idx = self._ring.index_of(vnode)
-        for _ in range(1, self._replication_factor):
-            idx = (idx + 1) % len(self._ring)
-            replicas.append(self._ring[idx])
-
-        return replicas

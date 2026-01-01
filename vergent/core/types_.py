@@ -13,13 +13,13 @@ class GatewayProtocol(Protocol):
 
 
 class Storage(Protocol):
-    async def get(self, key: str) -> bytes | None:
+    async def get(self, key: bytes) -> bytes | None:
         ...
 
-    async def put(self, key: str, value: bytes) -> None:
+    async def put(self, key: bytes, value: bytes) -> None:
         ...
 
-    async def delete(self, key: str) -> None:
+    async def delete(self, key: bytes) -> None:
         ...
 
     def iter(self, limit: int = -1, batch_size: int = 1024) -> AsyncIterator[tuple[str, bytes]]:

@@ -90,20 +90,19 @@ class Ring:
         for i in range(len(self._vnodes)):
             yield self._vnodes[(start + i) % len(self._vnodes)]
 
-    def preference_list(self, token: Token, replication_factor: int) -> list[str]:
+    def preference_list(self, vnode: VNode, replication_factor: int) -> list[VNode]:
         """
         Return N distinct node_ids in ring order starting from the successor.
 
         Skips vnodes belonging to the same physical node.
         """
-        succ = self.find_successor(token)
-        result = []
-        seen = set()
+        result: list[VNode] = [vnode]
+        seen = {vnode.node_id}
 
-        for vnode in self.iter_from(succ):
-            if vnode.node_id not in seen:
-                result.append(vnode.node_id)
-                seen.add(vnode.node_id)
+        for successor in self.iter_from(vnode):
+            if successor.node_id not in seen:
+                result.append(successor)
+                seen.add(successor.node_id)
             if len(result) == replication_factor:
                 break
 

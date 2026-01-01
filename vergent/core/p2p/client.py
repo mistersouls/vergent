@@ -104,11 +104,19 @@ class PeerClientPool:
         self._ssl_ctx = ssl_ctx
         self._loop = loop
         self.clients: dict[str, PeerClient] = {}
+        self._addresses: dict[str, str] = {}
 
-    def get(self, address) -> PeerClient:
-        if address not in self.clients:
-            self.clients[address] = PeerClient(address, self._ssl_ctx, self._subscription, self._loop)
-        return self.clients[address]
+    def register(self, node_id: str, address: str) -> None:
+        self._addresses[node_id] = address
+
+    def get(self, node_id: str) -> PeerClient:
+        if node_id not in self.clients:
+            if node_id not in self._addresses:
+                raise KeyError(f"No address registered for node_id={node_id}")
+
+            address = self._addresses[node_id]
+            self.clients[node_id] = PeerClient(address, self._ssl_ctx, self._subscription, self._loop)
+        return self.clients[node_id]
 
     async def close(self) -> None:
         await asyncio.gather(*[client.close() for client in self.clients.values()])

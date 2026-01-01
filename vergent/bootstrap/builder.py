@@ -1,17 +1,21 @@
+import asyncio
 from pathlib import Path
 
 from vergent.bootstrap.config.meta import VNodeMeta
 from vergent.bootstrap.config.settings import VergentConfig
 from vergent.core.app import App
 from vergent.core.config import Config
+from vergent.core.coordinator import Coordinator
 from vergent.core.facade import VergentCore
 from vergent.core.model.partition import Partitioner
 from vergent.core.model.vnode import VNode
+from vergent.core.p2p.client import PeerClientPool
 from vergent.core.placement import PlacementStrategy
 from vergent.core.ring import Ring
 from vergent.core.space import HashSpace
 from vergent.core.storage.partitionned import PartitionedStorage
 from vergent.core.storage.versionned import VersionedStorage
+from vergent.core.sub import Subscription
 from vergent.infra.local_storage import LMDBStorageFactory
 
 
@@ -43,14 +47,36 @@ class CoreBuilder:
             partitioner=partitioner,
             replication_factor=self.config.placement.replication_factor,
         )
-
         storage = self._build_storage(placement)
 
+        app_config = self._build_config()
+        loop = self._create_event_loop()
+
+        subscription = Subscription(loop)
+        peer_clients = PeerClientPool(
+            subscription=subscription,
+            ssl_ctx=app_config.get_client_ssl_ctx(),
+            loop=loop
+        )
+
+        coordinator = Coordinator(
+            node_id=self.config.node.id,
+            ring=ring,
+            peers=peer_clients,
+            placement=placement,
+            subscription=subscription,
+            storage=storage,
+            replication_factor=self.config.placement.replication_factor,
+            loop=loop
+        )
 
         return VergentCore(
             config=self._build_config(),
             placement=placement,
             storage=storage,
+            coordinator=coordinator,
+            peer_clients=peer_clients,
+            loop=loop
         )
 
     def _meta_path(self) -> Path:
@@ -126,3 +152,9 @@ class CoreBuilder:
             backend=partitioned,
             node_id=self.config.node.id,
         )
+
+    @staticmethod
+    def _create_event_loop() -> asyncio.AbstractEventLoop:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        return loop

@@ -1,6 +1,8 @@
 import asyncio
 
 from vergent.core.config import Config
+from vergent.core.coordinator import Coordinator
+from vergent.core.p2p.client import PeerClientPool
 from vergent.core.storage.versionned import VersionedStorage
 from vergent.core.placement import PlacementStrategy
 
@@ -11,14 +13,13 @@ class VergentCore:
         config: Config,
         placement: PlacementStrategy,
         storage: VersionedStorage,
+        coordinator: Coordinator,
+        peer_clients: PeerClientPool,
+        loop: asyncio.AbstractEventLoop,
     ) -> None:
         self.config = config
         self.placement = placement
         self.storage = storage
-        self.loop = self._get_event_loop()
-
-    @staticmethod
-    def _get_event_loop() -> asyncio.AbstractEventLoop:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        return loop
+        self.coordinator = coordinator
+        self.peer_clients = peer_clients
+        self.loop = loop

@@ -19,22 +19,22 @@ class PartitionedStorage(Storage):
         self._storage_factory = storage_factory
         self._placement = placement
 
-    def _select_backend(self, key: str) -> Storage:
-        partition = self._placement.find_partition_by_key(key.encode())
+    def _select_backend(self, key: bytes) -> Storage:
+        partition = self._placement.find_partition_by_key(key)
         backend = self._backends.get(str(partition.pid))
         if backend is None:
             backend = self._storage_factory.create(str(partition.pid))
         return backend
 
-    async def get(self, key: str) -> bytes | None:
+    async def get(self, key: bytes) -> bytes | None:
         backend = self._select_backend(key)
         return await backend.get(key)
 
-    async def put(self, key: str, value: bytes) -> None:
+    async def put(self, key: bytes, value: bytes) -> None:
         backend = self._select_backend(key)
         await backend.put(key, value)
 
-    async def delete(self, key: str) -> None:
+    async def delete(self, key: bytes) -> None:
         backend = self._select_backend(key)
         await backend.delete(key)
 
