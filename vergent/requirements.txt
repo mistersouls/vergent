@@ -1,2 +1,4 @@
 lmdb==1.7.5
 msgpack==1.1.2
+pydantic==2.12.5
+pydantic-settings[yaml]==2.12.0

@@ -25,3 +25,7 @@ class Storage(Protocol):
     def iter(self, limit: int = -1, batch_size: int = 1024) -> AsyncIterator[tuple[str, bytes]]:
         ...
 
+
+class StorageFactory(Protocol):
+    def create(self, sid: str) -> Storage:
+        ...

@@ -10,7 +10,7 @@ from vergent.core.p2p.client import PeerClientPool
 from vergent.core.p2p.conflict import ValueVersion
 from vergent.core.p2p.hlc import HLC
 from vergent.core.p2p.phi import FailureDetector
-from vergent.core.p2p.versionned import VersionedStorage
+from vergent.core.storage.versionned import VersionedStorage
 from vergent.core.p2p.view import MembershipView
 from vergent.core.sub import Subscription
 

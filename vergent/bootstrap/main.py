@@ -1,15 +1,10 @@
 import asyncio
-import functools
 
-from vergent.bootstrap.deps import get_cli_args, get_peer_manager
-from vergent.core.app import App
+from vergent.bootstrap.deps import get_core
+from vergent.bootstrap.pkg import scan
 from vergent.core.config import Config
 from vergent.core.model.state import ServerState
 from vergent.core.server import Server
-
-
-from vergent.core.types_ import GatewayProtocol
-from vergent.core.utils.log import setup_logging
 
 
 def _shutdown_p2p(state: ServerState, task: asyncio.Task[None]) -> None:
@@ -19,40 +14,21 @@ def _shutdown_p2p(state: ServerState, task: asyncio.Task[None]) -> None:
 
 
 def run(
-    app: GatewayProtocol,
+    # app: GatewayProtocol,
     *,
-    host: str = "127.0.0.1",
-    port: int = 8000,
-    backlog: int = 2048,
-    timeout_graceful_shutdown: float = 5.0,
-    advertise_address: str | None = None,
-    limit_concurrency: int = 1024,
-    max_buffer_size: int = 4 * 1024 * 1024,  # 4MB
-    max_message_size: int = 1 * 1024 * 1024, # 1MB
+    config: Config,
     loop: asyncio.AbstractEventLoop | None = None,
 ):
     if loop is None:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
-    config = Config(
-        app=app,
-        host=host,
-        port=port,
-        backlog=backlog,
-        timeout_graceful_shutdown=timeout_graceful_shutdown,
-        advertise_address=advertise_address,
-        limit_concurrency=limit_concurrency,
-        max_buffer_size=max_buffer_size,
-        max_message_size=max_message_size,
-        loop=loop
-    )
-    server = Server(config=config)
+    server = Server(config=config, loop=loop)
 
-    peer_manager = get_peer_manager()
-    p2p_task = loop.create_task(peer_manager.manage(server.state.stop_event))
-    p2p_task.add_done_callback(functools.partial(_shutdown_p2p, server.state))
-    server.state.tasks.add(p2p_task)
+    # peer_manager = get_peer_manager()
+    # p2p_task = loop.create_task(peer_manager.manage(server.state.stop_event))
+    # p2p_task.add_done_callback(functools.partial(_shutdown_p2p, server.state))
+    # server.state.tasks.add(p2p_task)
 
     try:
         server.run()
@@ -64,18 +40,7 @@ def run(
             loop.close()
 
 
-def entrypoint(app: App) -> None:
-    args = get_cli_args()
-    setup_logging(args.log_level)
-
-    run(
-        app=app,
-        host=args.host,
-        port=args.port,
-        backlog=args.backlog,
-        timeout_graceful_shutdown=args.timeout_graceful_shutdown,
-        advertise_address=args.advertise_address,
-        limit_concurrency=args.limit_concurrency,
-        max_buffer_size=args.max_buffer_size,
-        max_message_size=args.max_message_size
-    )
+@scan("vergent.bootstrap.handlers")
+def entrypoint() -> None:
+    core = get_core()
+    run(config=core.config, loop=core.loop)

@@ -1,7 +1,6 @@
 import asyncio
 import logging
 
-from vergent.bootstrap.deps import get_server_ssl_ctx
 from vergent.core.config import Config
 from vergent.core.model.state import ServerState
 from vergent.core.protocol import Protocol
@@ -9,13 +8,14 @@ from vergent.core.utils.sig import signal_handler
 
 
 class Server:
-    def __init__(self, config: Config) -> None:
+    def __init__(self, config: Config, loop: asyncio.AbstractEventLoop) -> None:
         self._config = config
+        self._loop = loop
         self.state = ServerState()
         self._logger = logging.getLogger("vergent.core.server")
 
     def run(self) -> None:
-        loop = self._config.loop
+        loop = self._loop
         loop.run_until_complete(self.serve())
 
     async def serve(self) -> None:
@@ -30,12 +30,12 @@ class Server:
         host = config.host
         port = config.port
 
-        server = await config.loop.create_server(
+        server = await self._loop.create_server(
             self.create_protocol,
             host=host,
             port=port,
             backlog=config.backlog,
-            ssl=get_server_ssl_ctx()
+            ssl=config.get_server_ssl_ctx()
         )
         print(f"=========== Server started at '{host}:{port}' ==============")
 
@@ -43,7 +43,7 @@ class Server:
         await self.shutdown(server)
 
     def create_protocol(self) -> asyncio.Protocol:
-        loop = self._config.loop
+        loop = self._loop
         return Protocol(config=self._config, server_state=self.state, loop=loop)
 
     async def loop_forever(self) -> None:

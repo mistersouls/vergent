@@ -1,5 +1,6 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import AsyncIterator
 
 import lmdb
@@ -7,7 +8,7 @@ import lmdb
 from vergent.core.types_ import Storage
 
 
-class LMDBStorage(Storage):
+class LMDBStorage:
     def __init__(
         self,
         path: str,
@@ -124,3 +125,33 @@ class LMDBStorage(Storage):
                     has_key = cursor.next()
 
         return items
+
+
+class LMDBStorageFactory:
+    def __init__(
+        self,
+        path: Path,
+        map_size: int = 1 << 30,
+        max_workers: int = 1,
+        readahead: bool = True,
+        writemap: bool = False,
+        sync: bool = False
+    ) -> None:
+        self._path = path
+        self._map_size = map_size
+        self._max_workers = max_workers
+        self._readahead = readahead
+        self._writemap = writemap
+        self._sync = sync
+
+    def create(self, sid: str) -> Storage:
+        path = self._path / sid
+        path.mkdir(exist_ok=True)
+        return LMDBStorage(
+            path=str(path),
+            map_size=self._map_size,
+            max_workers=self._max_workers,
+            readahead=self._readahead,
+            writemap=self._writemap,
+            sync=self._sync
+        )

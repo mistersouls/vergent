@@ -2,7 +2,7 @@ import argparse
 import asyncio
 
 from vergentctl.repl import repl
-from vergentctl.ssl import gen_root_ca, gen_node_cert, inspect_cert
+from vergentctl.ssl_ import gen_root_ca, gen_node_cert, inspect_cert
 
 
 def entrypoint() -> None:

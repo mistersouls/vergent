@@ -1,0 +1,159 @@
+
+# ---------------------------------------------------------------------
+# Node identity
+# ---------------------------------------------------------------------
+node:
+  # [Required]
+  # Unique and stable identifier for this node within the cluster.
+  # This value must be globally unique and must not change across restarts.
+  # It is used as the node's identity in gossip, vnode ownership, routing,
+  # rebalance planning, and all cluster‑wide coordination.
+  # The identifier should be explicit (e.g., 'node-1', 'db-a', 'shard-3') and
+  # must not depend on ephemeral properties such as IP address or hostname.
+  id: "node-1"
+
+  # [Default: L]
+  # Size class defining how many virtual slots (vnodes) this node receives
+  # when generating its vnode assignment for the first time.
+  #
+  # IMPORTANT:
+  #   - This value is used ONLY if the storage backend does NOT already contain
+  #     a persisted vnode list.
+  #   - Once a vnode list exists on disk, it becomes the authoritative source
+  #     of truth and this field is ignored.
+  #
+  # Allowed values:
+  #   XS  → 1 slot
+  #   S   → 2 slots
+  #   M   → 4 slots
+  #   L   → 8 slots
+  #   XL  → 16 slots
+  #   XXL → 32 slots
+  size: "L"
+
+
+# ---------------------------------------------------------------------
+# Server settings (TCP + TLS)
+# ---------------------------------------------------------------------
+server:
+  # [Default: 127.0.0.1]
+  # Host/IP on which the server listens for incoming TCP connections.
+  # This is the *bind address* used locally by the OS.
+  host: "127.0.0.1"
+
+  # [Default: 2000]
+  # TCP port on which the server listens.
+  # This is the port clients and peers connect to.
+  port: 2000
+
+  tls:
+    # [Required]
+    # Path to the node's TLS certificate (PEM).
+    # Vergent uses mandatory mutual TLS (mTLS): all traffic between nodes is
+    # encrypted and authenticated.
+    certfile: ""
+
+    # [Required]
+    # Path to the node's TLS private key (PEM).
+    # Required for mTLS: the node proves its identity using this key.
+    keyfile: ""
+
+    # [Required]
+    # Path to the CA certificate (PEM) used to verify peer node certificates.
+    # Vergent enforces mutual TLS (mTLS): nodes must present a certificate
+    # signed by this CA. Connections without valid certificates are rejected.
+    cafile: ""
+
+  # [Default: 128]
+  # Maximum number of pending TCP connections allowed by the OS.
+  # This controls how many clients can be waiting to connect.
+  backlog: 128
+
+  # [Default: 5.0]
+  # Maximum time (in seconds) allowed for a graceful shutdown.
+  # When the node receives SIGINT/SIGTERM/SIGBREAK, it begins a coordinated shutdown:
+  #   - stop accepting new connections
+  #   - finish in-flight requests
+  #   - flush and close storage
+  #   - notify peers of departure
+  # If this timeout is exceeded, the node forces termination.
+  timeout_graceful_shutdown: 5.0
+
+  # [Default: 1024]
+  # Maximum number of concurrent in-flight requests handled by the node.
+  # This protects the server from overload.
+  limit_concurrency: 1024
+
+  # [Default: 4194304 (4MB)]
+  # Maximum allowed buffer size for incoming data (in bytes).
+  # If exceeded, the connection is closed.
+  max_buffer_size: 4194304
+
+  # [Default: 1048576 (1MB)]
+  # Maximum allowed size for a single decoded message (in bytes).
+  max_message_size: 1048576
+
+
+# ---------------------------------------------------------------------
+# Advertised address
+# ---------------------------------------------------------------------
+advertised:
+  # [Optional]
+  # Public address (host:port) advertised to other nodes.
+  # This is the address peers will use to contact this node.
+  # It may differ from server.host/server.port when running behind NAT, Docker,
+  # Kubernetes, reverse proxies, or load balancers.
+  # If omitted, defaults to '<server.host>:<server.port>'.
+  listener: "127.0.0.1:2000"
+
+  # [Default: []]
+  # List of seed node addresses (host:port) used for initial cluster discovery.
+  # At startup, this node will contact the listed seeds to obtain the current
+  # cluster membership, ring layout, and gossip state.
+  #
+  # Seeds are only used during bootstrap. Once gossip converges, the node no
+  # longer depends on them, and the cluster can continue operating even if all
+  # seed nodes go offline.
+  #
+  # An empty list is valid for single‑node deployments or manual bootstrapping.
+  seeds: []
+
+
+# ---------------------------------------------------------------------
+# Storage settings
+# ---------------------------------------------------------------------
+storage:
+  # [Required]
+  # Directory where the node stores all persistent data.
+  # This directory is used by the storage backend.
+  # It must exist or be creatable, writable, and persistent across restarts.
+  data_dir: ""
+
+
+# ---------------------------------------------------------------------
+# Placement / Ring configuration
+# ---------------------------------------------------------------------
+placement:
+  # [Default: 16]
+  # Shift factor used to compute the total number of logical partitions (Q).
+  # Q = 1 << shift
+  #
+  # This defines the granularity of the ring. A larger shift increases the
+  # number of partitions, improving distribution fairness but also increasing
+  # the number of storage directories and the cost of rebalancing.
+  #
+  # This value MUST remain stable for the lifetime of the cluster.
+  # Changing it alters every partition boundary and requires a full migration.
+  shift: 16
+
+  # [Default: 3]
+  # Number of distinct nodes that must store each partition.
+  # A replication_factor of N means each key is stored on N different nodes,
+  # following the ring's successor ordering.
+  #
+  # This value must be <= the number of nodes in the cluster.
+  # Increasing it adds replicas and triggers a controlled rebalance.
+  # Decreasing it removes replicas and requires to be coordinated cleanup.
+  #
+  # This setting affects durability, availability, and quorum rules.
+  replication_factor: 3
