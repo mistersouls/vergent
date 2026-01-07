@@ -1,9 +1,12 @@
 import asyncio
+import logging
 
 from vergent.bootstrap.config.loader import get_cli_args
 from vergent.bootstrap.deps import get_core
 from vergent.bootstrap.pkg import scan
-from vergent.core.config import Config
+from vergent.core.bootstrapper import SeedBootstrapper
+from vergent.core.facade import VergentCore
+from vergent.core.manager import PeerManager
 from vergent.core.model.state import ServerState
 from vergent.core.server import Server
 from vergent.core.utils.log import setup_logging
@@ -15,17 +18,48 @@ def _shutdown_p2p(state: ServerState, task: asyncio.Task[None]) -> None:
     state.stop_event.set()
 
 
-def run(
-    # app: GatewayProtocol,
-    *,
-    config: Config,
-    loop: asyncio.AbstractEventLoop | None = None,
-):
-    if loop is None:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+async def async_run(
+    core: VergentCore,
+    stop_event: asyncio.Event,
+) -> None:
+    api_config = core.api_config
+    peer_config = core.peer_config
+    peer_state = core.peer_state
+    loop = core.loop
 
-    server = Server(config=config, loop=loop)
+    logger = logging.getLogger("vergent.bootstrap.main")
+    api = Server(config=api_config, loop=loop, stop_event=stop_event)
+    peer = Server(config=peer_config, loop=loop, stop_event=stop_event)
+
+    # peer_manager = get_peer_manager()
+    # p2p_task = loop.create_task(peer_manager.manage(server.state.stop_event))
+    # p2p_task.add_done_callback(functools.partial(_shutdown_p2p, server.state))
+    # server.state.tasks.add(p2p_task)
+
+    await peer.start()
+
+    peer_manager = PeerManager(
+        config=peer_config,
+        state=peer_state,
+        conns=core.connection_pools,
+        partitioner=core.partitioner,
+        view=core.view,
+        loop=loop,
+        # view=initial_view,
+        # partitioner=core.partitioner,
+    )
+    await peer_manager.start(stop_event)
+
+    await api.start()
+
+    logger.info("[main] Node is now fully operational (P2P + API).")
+
+    await stop_event.wait()
+
+
+def run(core: VergentCore) -> None:
+    loop = core.loop
+    stop_event = asyncio.Event()
 
     # peer_manager = get_peer_manager()
     # p2p_task = loop.create_task(peer_manager.manage(server.state.stop_event))
@@ -33,8 +67,12 @@ def run(
     # server.state.tasks.add(p2p_task)
 
     try:
-        server.run()
+        loop.run_until_complete(
+            async_run(core, stop_event)
+        )
     except KeyboardInterrupt:
+        stop_event.set()
+
         try:
             loop.run_until_complete(loop.shutdown_asyncgens())
             loop.run_until_complete(loop.shutdown_default_executor())
@@ -48,4 +86,4 @@ def entrypoint() -> None:
     core = get_core()
 
     setup_logging(cli.log_level)
-    run(config=core.config, loop=core.loop)
+    run(core)

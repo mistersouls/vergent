@@ -1,26 +1,45 @@
 import asyncio
 import logging
 
-from vergent.core.config import Config
+from vergent.core.config import ServerConfig
 from vergent.core.model.state import ServerState
 from vergent.core.protocol import Protocol
 from vergent.core.utils.sig import signal_handler
 
 
 class Server:
-    def __init__(self, config: Config, loop: asyncio.AbstractEventLoop) -> None:
+    def __init__(
+        self,
+        config: ServerConfig,
+        loop: asyncio.AbstractEventLoop,
+        stop_event: asyncio.Event | None = None,
+    ) -> None:
         self._config = config
         self._loop = loop
-        self.state = ServerState()
+        self._stop_event = stop_event or asyncio.Event()
+        self.state = ServerState(stop_event=self._stop_event)
         self._logger = logging.getLogger("vergent.core.server")
 
     def run(self) -> None:
         loop = self._loop
         loop.run_until_complete(self.serve())
 
+    async def start(self) -> asyncio.Server:
+        config = self._config
+        host = config.host
+        port = config.port
+
+        return await self._loop.create_server(
+            self.create_protocol,
+            host=host,
+            port=port,
+            backlog=config.backlog,
+            ssl=config.ssl_ctx
+        )
+
     async def serve(self) -> None:
         def graceful_exit(*_) -> None:
-            self.state.stop_event.set()
+            self._stop_event.set()
 
         with signal_handler(graceful_exit):
             await self._serve()
@@ -30,14 +49,8 @@ class Server:
         host = config.host
         port = config.port
 
-        server = await self._loop.create_server(
-            self.create_protocol,
-            host=host,
-            port=port,
-            backlog=config.backlog,
-            ssl=config.get_server_ssl_ctx()
-        )
-        print(f"=========== Server started at '{host}:{port}' ==============")
+        server = await self.start()
+        print(f"=========== Listening on '{host}:{port}' ==============")
 
         await self.loop_forever()
         await self.shutdown(server)
@@ -47,7 +60,7 @@ class Server:
         return Protocol(config=self._config, server_state=self.state, loop=loop)
 
     async def loop_forever(self) -> None:
-        await self.state.stop_event.wait()
+        await self._stop_event.wait()
 
     async def shutdown(self, server: asyncio.Server) -> None:
         server.close()

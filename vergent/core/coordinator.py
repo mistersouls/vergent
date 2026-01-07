@@ -3,11 +3,11 @@ import logging
 import uuid
 
 from vergent.core.model.event import Event
+from vergent.core.model.partition import Partitioner
+from vergent.core.model.state import PeerState
 from vergent.core.model.vnode import VNode
-from vergent.core.p2p.client import PeerClientPool
+from vergent.core.p2p.connection import PeerConnectionPool
 from vergent.core.p2p.conflict import ValueVersion, ConflictResolver
-from vergent.core.placement import PlacementStrategy
-from vergent.core.ring import Ring
 from vergent.core.storage.versionned import VersionedStorage
 from vergent.core.sub import Subscription
 
@@ -64,18 +64,18 @@ class Coordinator:
     def __init__(
         self,
         node_id: str,
-        ring: Ring,
-        peers: PeerClientPool,
-        placement: PlacementStrategy,
+        state: PeerState,
+        peers: PeerConnectionPool,
+        partitioner: Partitioner,
         subscription: Subscription[Event | None],
         storage: VersionedStorage,
         replication_factor: int,
         loop: asyncio.AbstractEventLoop,
     ) -> None:
         self._local_node_id = node_id
-        self._ring = ring
+        self._state = state
         self._peers = peers
-        self._placement = placement
+        self._partitioner = partitioner
         self._subscription = subscription
         self._storage = storage
         self._replication_factor = replication_factor
@@ -111,7 +111,8 @@ class Coordinator:
         quorum_write: int,
         timeout: float,
     ) -> bool:
-        replicas = self._ring.preference_list(primary, self._replication_factor)
+        ring = self._state.ring
+        replicas = ring.preference_list(primary, self._replication_factor)
 
         request_id = str(uuid.uuid4())
         pending = PendingWrite(request_id, quorum_write, self._loop)
@@ -147,8 +148,8 @@ class Coordinator:
         quorum_read: int,
         timeout: float,
     ) -> bytes | None:
-
-        replicas = self._ring.preference_list(primary, self._replication_factor)
+        ring = self._state.ring
+        replicas = ring.preference_list(primary, self._replication_factor)
 
         request_id = str(uuid.uuid4())
         pending = PendingRead(request_id, quorum_read, self._loop)
@@ -188,7 +189,8 @@ class Coordinator:
         quorum_write: int,
         timeout: float
     ) -> bool:
-        replicas = self._ring.preference_list(primary, self._replication_factor)
+        ring = self._state.ring
+        replicas = ring.preference_list(primary, self._replication_factor)
 
         request_id = str(uuid.uuid4())
         pending = PendingWrite(request_id, quorum_write, self._loop)
@@ -289,9 +291,9 @@ class Coordinator:
         quorum_read: int,
         timeout: float,
     ) -> bytes | None:
-
-        partition = self._placement.find_partition_by_key(key)
-        primary = self._placement.find_vnode_by_partition(partition)
+        ring = self._state.ring
+        placement = self._partitioner.find_placement_by_key(key, ring)
+        primary = placement.vnode
 
         if self._local_node_id != primary.node_id:
             return await self.forward_get(
@@ -319,8 +321,9 @@ class Coordinator:
         replication_factor (N)
         quorum_write (W)
         """
-        partition = self._placement.find_partition_by_key(key)
-        primary = self._placement.find_vnode_by_partition(partition)
+        ring = self._state.ring
+        placement = self._partitioner.find_placement_by_key(key, ring)
+        primary = placement.vnode
 
         if self._local_node_id != primary.node_id:
             return await self.forward_put(
@@ -349,8 +352,9 @@ class Coordinator:
         replication_factor (N)
         quorum_write (W)
         """
-        partition = self._placement.find_partition_by_key(key)
-        primary = self._placement.find_vnode_by_partition(partition)
+        ring = self._state.ring
+        placement = self._partitioner.find_placement_by_key(key, ring)
+        primary = placement.vnode
 
         if self._local_node_id != primary.node_id:
             return await self.forward_delete(

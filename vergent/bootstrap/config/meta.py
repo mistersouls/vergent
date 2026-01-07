@@ -37,13 +37,6 @@ class VNodeMeta(BaseModel):
         )
     ]
 
-    tokens: Annotated[
-        list[int],
-        Field(
-            description="List of vnode tokens in the hash space."
-        )
-    ]
-
     @field_validator("size", mode="before")
     @classmethod
     def parse_size(cls, v):

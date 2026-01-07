@@ -1,18 +1,20 @@
 import asyncio
+import ssl
 from pathlib import Path
 
 from vergent.bootstrap.config.meta import VNodeMeta
 from vergent.bootstrap.config.settings import VergentConfig
 from vergent.core.app import App
-from vergent.core.config import Config
+from vergent.core.bucket import BucketTable
+from vergent.core.config import ApiConfig, PeerConfig
 from vergent.core.coordinator import Coordinator
 from vergent.core.facade import VergentCore
+from vergent.core.model.membership import Membership
 from vergent.core.model.partition import Partitioner
+from vergent.core.model.state import PeerState
 from vergent.core.model.vnode import VNode
-from vergent.core.p2p.client import PeerClientPool
-from vergent.core.placement import PlacementStrategy
+from vergent.core.p2p.connection import PeerConnectionPool
 from vergent.core.ring import Ring
-from vergent.core.space import HashSpace
 from vergent.core.storage.partitionned import PartitionedStorage
 from vergent.core.storage.versionned import VersionedStorage
 from vergent.core.sub import Subscription
@@ -31,39 +33,36 @@ class CoreBuilder:
     - Build the storage stack
     """
 
-    def __init__(self, app: App, config: VergentConfig) -> None:
+    def __init__(self, api: App, peer: App, config: VergentConfig) -> None:
         self.config = config
-        self.app = app
+        self.api = api
+        self.peer = peer
 
     def build(self) -> VergentCore:
-        meta = self._load_or_generate_meta()
-        vnodes = [VNode(token, meta.node_id) for token in meta.tokens]
+        server_ssl_ctx = self.config.get_server_ssl_ctx()
+        client_ssl_ctx = self.config.get_client_ssl_ctx()
+        api_config = self._build_api_config(server_ssl_ctx)
+        peer_config = self._build_peer_config(server_ssl_ctx, client_ssl_ctx)
 
-        ring = Ring(vnodes)
+
+        peer_state = self._build_peer_state(peer_config)
+
         partitioner = Partitioner(self.config.placement.shift)
-
-        placement = PlacementStrategy(
-            ring=ring,
-            partitioner=partitioner,
-            replication_factor=self.config.placement.replication_factor,
-        )
-        storage = self._build_storage(placement)
-
-        app_config = self._build_config()
+        storage = self._build_storage(partitioner)
         loop = self._create_event_loop()
 
         subscription = Subscription(loop)
-        peer_clients = PeerClientPool(
+        peer_clients = PeerConnectionPool(
             subscription=subscription,
-            ssl_ctx=app_config.get_client_ssl_ctx(),
+            ssl_ctx=client_ssl_ctx,
             loop=loop
         )
 
         coordinator = Coordinator(
             node_id=self.config.node.id,
-            ring=ring,
             peers=peer_clients,
-            placement=placement,
+            state=peer_state,
+            partitioner=partitioner,
             subscription=subscription,
             storage=storage,
             replication_factor=self.config.placement.replication_factor,
@@ -71,8 +70,12 @@ class CoreBuilder:
         )
 
         return VergentCore(
-            config=self._build_config(),
-            placement=placement,
+            api_config=api_config,
+            peer_config=peer_config,
+            peer_state=peer_state,
+            incoming=subscription,
+            view=BucketTable(128),
+            partitioner=partitioner,
             storage=storage,
             coordinator=coordinator,
             peer_clients=peer_clients,
@@ -90,17 +93,10 @@ class CoreBuilder:
             self._validate_meta(meta)
             return meta
 
-        # Generate new vnode metadata
-        tokens = HashSpace.generate_tokens(
-            label=self.config.node.id,
-            count=self.config.node.size.value,
-        )
-
         meta = VNodeMeta(
             version=1,
             node_id=self.config.node.id,
             size=self.config.node.size,
-            tokens=list(tokens),
         )
 
         meta.save(path)
@@ -115,38 +111,76 @@ class CoreBuilder:
                 f"Fix by restoring the correct data_dir or wiping it before restart."
             )
 
-    def _build_config(self) -> Config:
-        config = self.config
-        host = config.server.host
-        port = config.server.port
-        advertised_listener = config.advertised.listener or f"{host}:{port}"
+    def _build_api_config(self, ssl_ctx: ssl.SSLContext) -> ApiConfig:
+        server = self.config.server
 
-        app_config = Config(
-            app=self.app,
-            node_id=config.node.id,
-            node_size=config.node.size,
-            host=host,
-            port=port,
-            tls_certfile=config.server.tls.certfile,
-            tls_keyfile=config.server.tls.keyfile,
-            tls_cafile=config.server.tls.cafile,
-            backlog=config.server.backlog,
-            timeout_graceful_shutdown=config.server.timeout_graceful_shutdown,
-            advertised_listener=advertised_listener,
-            limit_concurrency=config.server.limit_concurrency,
-            max_buffer_size=config.server.max_buffer_size,
-            max_message_size=config.server.max_message_size,
-            partition_shift=config.placement.shift,
-            replication_factor=config.placement.replication_factor
+        api_config = ApiConfig(
+            app=self.api,
+            host=server.api.host,
+            port=server.api.port,
+            backlog=server.backlog,
+            ssl_ctx=ssl_ctx,
+            limit_concurrency=server.limit_concurrency,
+            max_buffer_size=server.max_buffer_size,
+            max_message_size=server.max_message_size,
+            timeout_graceful_shutdown=server.timeout_graceful_shutdown
         )
 
-        return app_config
+        return api_config
 
-    def _build_storage(self, placement: PlacementStrategy) -> VersionedStorage:
+    def _build_peer_config(
+        self,
+        server_ssl_ctx: ssl.SSLContext,
+        client_ssl_ctx: ssl.SSLContext
+    ) -> PeerConfig:
+        server = self.config.server
+        peer = server.peer
+        host = peer.host
+        port = peer.port
+        advertised_listener = peer.listener or f"{host}:{port}"
+
+        peer_config = PeerConfig(
+            app=self.peer,
+            node_id=self.config.node.id,
+            node_size=self.config.node.size,
+            host=host,
+            port=port,
+            backlog=server.backlog,
+            ssl_ctx=server_ssl_ctx,
+            client_ssl_ctx=client_ssl_ctx,
+            timeout_graceful_shutdown=server.timeout_graceful_shutdown,
+            limit_concurrency=server.limit_concurrency,
+            max_buffer_size=server.max_buffer_size,
+            max_message_size=server.max_message_size,
+            advertised_listener=advertised_listener,
+            seeds=set(peer.seeds),
+            partition_shift=self.config.placement.shift,
+            replication_factor=self.config.placement.replication_factor
+        )
+        return peer_config
+
+    def _build_peer_state(self, config: PeerConfig) -> PeerState:
+        meta = self._load_or_generate_meta()
+        vnodes = VNode.generate_vnodes(meta.node_id, meta.size)
+        ring = Ring(vnodes)
+        membership = Membership(
+            node_id=meta.node_id,
+            address=config.advertised_listener,
+            size=meta.size,
+            # state="dead"
+        )
+        state = PeerState(
+            membership=membership,
+            vnodes=vnodes,
+            ring=ring,
+        )
+        return state
+
+    def _build_storage(self, partitioner: Partitioner) -> VersionedStorage:
         storage_factory = LMDBStorageFactory(self.config.storage.data_dir)
         partitioned = PartitionedStorage(
             storage_factory=storage_factory,
-            placement=placement,
+            partitioner=partitioner,
         )
         return VersionedStorage(
             backend=partitioned,

@@ -1,5 +1,9 @@
 from dataclasses import dataclass
 
+from vergent.core.model.vnode import VNode
+from vergent.core.ring import Ring
+from vergent.core.space import HashSpace
+
 
 class Partitioner:
     def __init__(self, partition_shift: int) -> None:
@@ -39,6 +43,16 @@ class Partitioner:
         start, end = self.segment_for_pid(pid)
         return LogicalPartition(pid, start, end)
 
+    def find_partition_by_key(self, key: bytes) -> LogicalPartition:
+        token = HashSpace.hash(key)
+        partition = self.partition_for_hash(token)
+        return partition
+
+    def find_placement_by_key(self, key: bytes, ring: Ring) -> PartitionPlacement:
+        partition = self.find_partition_by_key(key)
+        vnode = ring.find_successor(partition.end)
+        return PartitionPlacement(partition, vnode)
+
 
 @dataclass(frozen=True, slots=True)
 class LogicalPartition:
@@ -65,3 +79,9 @@ class LogicalPartition:
     def contains(self, h: int) -> bool:
         """Reports whether the hash h belongs to this partition."""
         return self.start < h <= self.end
+
+
+@dataclass(frozen=True, slots=True)
+class PartitionPlacement:
+    partition: LogicalPartition
+    vnode: VNode

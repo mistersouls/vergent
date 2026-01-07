@@ -4,7 +4,7 @@ import struct
 
 import msgpack
 
-from vergent.core.config import Config
+from vergent.core.config import ServerConfig
 from vergent.core.flow import FlowControl
 from vergent.core.model.event import Event
 from vergent.core.model.state import ServerState
@@ -15,7 +15,7 @@ from vergent.core.utils.addr import get_remote_addr
 class Protocol(asyncio.Protocol):
     def __init__(
         self,
-        config: Config,
+        config: ServerConfig,
         server_state: ServerState,
         loop: asyncio.AbstractEventLoop | None = None,
     ) -> None:

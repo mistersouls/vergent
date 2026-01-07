@@ -1,6 +1,6 @@
 from typing import AsyncIterator
 
-from vergent.core.placement import PlacementStrategy
+from vergent.core.model.partition import Partitioner
 from vergent.core.types_ import Storage, StorageFactory
 
 
@@ -10,17 +10,17 @@ class PartitionedStorage(Storage):
     based on the partitioning strategy.
     """
 
-    def __init__(self, storage_factory: StorageFactory, placement: PlacementStrategy) -> None:
+    def __init__(self, storage_factory: StorageFactory, partitioner: Partitioner) -> None:
         """
         backends: mapping partition_id -> Storage backend
         placement: object with route(key: bytes) -> (partition, vnode)
         """
         self._backends: dict[str, Storage] = {}
         self._storage_factory = storage_factory
-        self._placement = placement
+        self._partitioner = partitioner
 
     def _select_backend(self, key: bytes) -> Storage:
-        partition = self._placement.find_partition_by_key(key)
+        partition = self._partitioner.find_partition_by_key(key)
         backend = self._backends.get(str(partition.pid))
         if backend is None:
             backend = self._storage_factory.create(str(partition.pid))

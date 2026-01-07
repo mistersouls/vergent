@@ -2,6 +2,7 @@ import asyncio
 import logging
 import ssl
 import struct
+from typing import AsyncGenerator
 
 import msgpack
 
@@ -10,7 +11,7 @@ from vergent.core.sub import Subscription
 from vergent.core.utils.retry import BackoffRetry
 
 
-class PeerClient:
+class PeerConnection:
     def __init__(
         self,
         address: str,
@@ -44,7 +45,7 @@ class PeerClient:
                 self.connected = True
                 if self._receive_task:
                     self._receive_task.cancel()
-                self._receive_task = self._loop.create_task(self.receive_loop())
+                self._receive_task = self._loop.create_task(self.recv())
                 break
             except Exception as ex:
                 delay = self._backoff.next_delay()
@@ -62,7 +63,7 @@ class PeerClient:
         self._writer.write(frame)
         await self._writer.drain()
 
-    async def receive_loop(self) -> None:
+    async def recv(self) -> None:
         try:
             while True:
                 if not self.connected:
@@ -93,7 +94,7 @@ class PeerClient:
             await self._writer.wait_closed()
 
 
-class PeerClientPool:
+class PeerConnectionPool:
     def __init__(
         self,
         subscription: Subscription[Event | None],
@@ -103,20 +104,26 @@ class PeerClientPool:
         self._subscription = subscription
         self._ssl_ctx = ssl_ctx
         self._loop = loop
-        self.clients: dict[str, PeerClient] = {}
+        self.clients: dict[str, PeerConnection] = {}
         self._addresses: dict[str, str] = {}
 
     def register(self, node_id: str, address: str) -> None:
         self._addresses[node_id] = address
 
-    def get(self, node_id: str) -> PeerClient:
+    def subscribe(self) -> AsyncGenerator[Event | None, None]:
+        return self._subscription.subscribe()
+
+    def get(self, node_id: str) -> PeerConnection:
         if node_id not in self.clients:
             if node_id not in self._addresses:
                 raise KeyError(f"No address registered for node_id={node_id}")
 
             address = self._addresses[node_id]
-            self.clients[node_id] = PeerClient(address, self._ssl_ctx, self._subscription, self._loop)
+            self.clients[node_id] = PeerConnection(address, self._ssl_ctx, self._subscription, self._loop)
         return self.clients[node_id]
+
+    def has(self, peer: str) -> bool:
+        return peer in self._addresses
 
     async def close(self) -> None:
         await asyncio.gather(*[client.close() for client in self.clients.values()])

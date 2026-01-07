@@ -1,10 +1,10 @@
 import msgpack
 
-from vergent.bootstrap.deps import get_app, get_core
+from vergent.bootstrap.deps import get_api_app, get_core
 from vergent.core.model.event import Event
 
 
-app = get_app()
+app = get_api_app()
 
 
 @app.request("get")

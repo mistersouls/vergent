@@ -1,4 +1,3 @@
-import asyncio
 import json
 from functools import lru_cache
 
@@ -13,17 +12,15 @@ from vergent.core.p2p.manager import PeerManager
 
 
 @lru_cache
-def get_app() -> App:
+def get_api_app() -> App:
     app = App()
     return app
 
 
 @lru_cache
-def get_advertise_address() -> str:
-    args = get_cli_args()
-    if args.advertised_listener:
-        return args.advertised_listener
-    return f"{args.host}:{args.port}"
+def get_peer_app() -> App:
+    app = App()
+    return app
 
 
 @lru_cache
@@ -42,9 +39,10 @@ def get_peer_manager() -> PeerManager:
 @lru_cache
 def get_core() -> VergentCore:
     config = get_config()
-    app = get_app()
+    api = get_api_app()
+    peer = get_peer_app()
 
-    builder = CoreBuilder(app=app, config=config)
+    builder = CoreBuilder(api=api, peer=peer, config=config)
     return builder.build()
 
 

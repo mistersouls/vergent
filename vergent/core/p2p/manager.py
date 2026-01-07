@@ -6,12 +6,11 @@ import ssl
 from typing import Mapping, Any
 
 from vergent.core.model.event import Event
-from vergent.core.p2p.client import PeerClientPool
+from vergent.core.p2p.connection import PeerConnectionPool
 from vergent.core.p2p.conflict import ValueVersion
 from vergent.core.p2p.hlc import HLC
 from vergent.core.p2p.phi import FailureDetector
 from vergent.core.storage.versionned import VersionedStorage
-from vergent.core.p2p.view import MembershipView
 from vergent.core.sub import Subscription
 
 
@@ -31,7 +30,7 @@ class PeerManager:
 
         self._outgoing: Subscription[Event | None] = Subscription(self._loop)
         self._incoming: Subscription[Event | None] = Subscription(self._loop)
-        self._clients = PeerClientPool(self._incoming, self._ssl_ctx, self._loop)
+        self._clients = PeerConnectionPool(self._incoming, self._ssl_ctx, self._loop)
 
         self._detectors: dict[str, FailureDetector] = {
             peer: FailureDetector()
@@ -198,7 +197,7 @@ class PeerManager:
         membership: Mapping[str, Mapping[str, Any]]
     ) -> MembershipView:
         remote_peers = set(membership.keys())
-        remote_view = MembershipView(node=remote_node, initial_peers=remote_peers)
+        remote_view = MembershipView(node_id=remote_node, initial_peers=remote_peers)
 
         for peer, data in membership.items():
             entry = remote_view.get(peer)

@@ -4,6 +4,7 @@ from vergent.core.ring import Ring
 from vergent.core.space import HashSpace
 
 
+# note: deprecated
 class PlacementStrategy:
     """
     Combines the Partitioner and the Ring to provide:
@@ -14,11 +15,11 @@ class PlacementStrategy:
 
     def __init__(
         self,
-        ring: Ring,
+        # ring: Ring,
         partitioner: Partitioner,
         replication_factor: int = 3
     ) -> None:
-        self._ring = ring
+        # self._ring = ring
         self._partitioner = partitioner
         self._replication_factor = replication_factor
 
@@ -27,6 +28,6 @@ class PlacementStrategy:
         partition = self._partitioner.partition_for_hash(token)
         return partition
 
-    def find_vnode_by_partition(self, partition: LogicalPartition) -> VNode:
-        vnode = self._ring.find_successor(partition.end)
-        return vnode
+    # def find_vnode_by_partition(self, partition: LogicalPartition) -> VNode:
+    #     vnode = self._ring.find_successor(partition.end)
+    #     return vnode
