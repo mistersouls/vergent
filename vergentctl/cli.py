@@ -1,6 +1,8 @@
 import argparse
 import asyncio
 
+from vergent.core.model.event import Event
+from vergentctl.admin import admin_cmd
 from vergentctl.repl import repl
 from vergentctl.ssl_ import gen_root_ca, gen_node_cert, inspect_cert
 
@@ -13,6 +15,7 @@ def entrypoint() -> None:
         "gen-root-cert": cmd_gen_root,
         "gen-cert": cmd_gen_cert,
         "inspect-cert": cmd_inspect_cert,
+        "join": cmd_join
     }
 
     handler = commands.get(args.command)
@@ -84,6 +87,27 @@ def parse_args():
     p_inspect = sub.add_parser("inspect-cert", help="Display certificate information")
     p_inspect.add_argument("--cert", required=True, help="Certificate file (PEM)")
 
+    p_join = sub.add_parser("join", help="Join.....")
+    p_join.add_argument("--host")
+    p_join.add_argument("--port", type=int)
+    p_join.add_argument("address", nargs="?", help="host:port")
+    p_join.add_argument(
+        "--tls-certfile",
+        required=True,
+        help="Client certificate (PEM) used for mTLS",
+    )
+    p_join.add_argument(
+        "--tls-keyfile",
+        required=True,
+        help="Client private key (PEM) used for mTLS",
+    )
+    p_join.add_argument(
+        "--tls-cafile",
+        required=True,
+        help="CA certificate (PEM) used to validate the node certificate",
+    )
+
+
     return parser.parse_args()
 
 
@@ -123,3 +147,19 @@ def cmd_gen_cert(args) -> None:
 
 def cmd_inspect_cert(args):
     inspect_cert(args.cert)
+
+
+def cmd_join(args):
+    if args.host and args.port:
+        host, port = args.host, args.port
+    elif args.address:
+        if ":" not in args.address:
+            print("Error: address must be host:port")
+            exit(1)
+        host, port = args.address.split(":")
+        port = int(port)
+    else:
+        raise
+
+    event = Event(type="join", payload={})
+    asyncio.run(admin_cmd(event, host, port, args.tls_certfile, args.tls_keyfile, args.tls_cafile))
