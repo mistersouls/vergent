@@ -52,10 +52,10 @@ class SeedBootstrapper:
             fetch_views = asyncio.create_task(self.fetch_views())
 
             try:
-                self._logger.debug(f"[bootstrap] Sending sync/checksums requests")
+                self._logger.debug(f"[bootstrap] Sending sync checksums requests")
                 await asyncio.wait_for(self.try_once(), timeout=5)
             except asyncio.TimeoutError:
-                self._logger.warning(f"[bootstrap] Sending sync/checksums timed out")
+                self._logger.warning(f"[bootstrap] Sending sync checksums timed out")
 
             elapsed = 5 - (self._loop.time() - start)
             if elapsed < 0:

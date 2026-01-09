@@ -22,6 +22,7 @@ async def ping(data: dict) -> Event:
 @app.request("gossip")
 async def gossip(data: dict) -> Event:
     core = get_core()
+    core.incoming.publish(Event(type="gossip", payload=data))
     return Event(
             type="gossip",
             payload={

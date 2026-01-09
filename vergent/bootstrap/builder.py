@@ -161,7 +161,7 @@ class CoreBuilder:
 
     def _build_peer_state(self, config: PeerConfig) -> PeerState:
         meta = self._load_or_generate_meta()
-        vnodes = VNode.generate_vnodes(meta.node_id, meta.size)
+        vnodes = VNode.generate_vnodes(meta.node_id, meta.size.value)
         ring = Ring(vnodes)
         membership = Membership(
             node_id=meta.node_id,

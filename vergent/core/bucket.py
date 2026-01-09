@@ -2,8 +2,8 @@ import hashlib
 import zlib
 import random
 
-from vergent.core.gossip.frame import Serializer
 from vergent.core.model.membership import Membership
+from vergent.infra.msgpack_serializer import Serializer
 
 
 class Bucket:
@@ -99,8 +99,19 @@ class BucketTable:
         self._dirty_global = False
         return checksums
 
-    def get_bucket_memberships(self, bucket_id: str) -> list[bytes]:
+    def get_bucket_memberships(self, bucket_id: str) -> dict[str, dict]:
         return self.buckets[bucket_id].serialize_memberships()
+
+    def compute_missing_buckets(self, remote_checksums: dict[str, int]) -> list[str]:
+        local = self.get_checksums()
+        missing = []
+
+        for bucket_id, remote_crc in remote_checksums.items():
+            local_crc = local.get(bucket_id)
+            if local_crc != remote_crc:
+                missing.append(bucket_id)
+
+        return missing
 
     def merge_bucket(self, bucket_id: str, memberships: list[Membership]) -> None:
         bucket = self.buckets[bucket_id]

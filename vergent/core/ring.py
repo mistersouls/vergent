@@ -33,7 +33,7 @@ class Ring:
             idx = 0  # wrap-around
         return self._vnodes[idx]
 
-    def update_ring(self, vnodes: list[VNode]) -> Ring:
+    def add_vnodes(self, vnodes: list[VNode]) -> Ring:
         """
         Add multiple vnodes efficiently by sorting locally and merging.
 
@@ -48,6 +48,30 @@ class Ring:
         new_vnodes = sorted(vnodes)
         sorted_vnodes = self._merge_sorted(self._vnodes, new_vnodes)
         return Ring(sorted_vnodes, _sorted=False)
+
+    def drop_nodes(self, node_ids: set[str]) -> Ring:
+        """Remove all vnodes belonging to the given node_ids."""
+        remaining = [v for v in self._vnodes if v.node_id not in node_ids]
+        return Ring(remaining, _sorted=True)
+
+    def trim_nodes(self, trims: dict[str, int]) -> Ring:
+        """
+        Remove the last `count` vnodes for each node_id in trims.
+        trims = {node_id: count}
+        """
+        counters = trims.copy()
+        remaining: list[VNode] = []
+
+        # iterate reversed to remove last vnodes first
+        for vnode in reversed(self._vnodes):
+            node = vnode.node_id
+            if node in counters and counters[node] > 0:
+                counters[node] -= 1
+            else:
+                remaining.append(vnode)
+
+        remaining.reverse()
+        return Ring(remaining, _sorted=True)
 
     def index_of(self, vnode: VNode) -> int:
         return self._vnodes.index(vnode)
@@ -89,6 +113,11 @@ class Ring:
         start = self._vnodes.index(vnode)
         for i in range(len(self._vnodes)):
             yield self._vnodes[(start + i) % len(self._vnodes)]
+
+    def iter_by_node_id(self, node_id) -> Generator[VNode, None, None]:
+        for vnode in self._vnodes:
+            if vnode.node_id == node_id:
+                yield vnode
 
     def preference_list(self, vnode: VNode, replication_factor: int) -> list[VNode]:
         """

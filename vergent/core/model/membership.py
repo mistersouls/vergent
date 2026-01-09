@@ -31,3 +31,24 @@ class Membership:
             "epoch": self.epoch,
             "size": self.size.name
         }
+
+@dataclass
+class MembershipChange:
+    before: Membership
+    after: Membership
+
+
+@dataclass(frozen=True)
+class MembershipDiff:
+    added: list[Membership]
+    removed: list[Membership]
+    updated: list[MembershipChange]
+    bucket_id: str
+
+    @property
+    def changed(self) -> bool:
+        return bool(self.added or self.removed or self.updated)
+
+    @classmethod
+    def from_empty(cls, bucket_id: str) -> MembershipDiff:
+        return MembershipDiff(added=[], removed= [], updated=[], bucket_id=bucket_id)

@@ -110,8 +110,9 @@ class PeerConnectionPool:
     def register(self, node_id: str, address: str) -> None:
         self._addresses[node_id] = address
 
-    def subscribe(self) -> AsyncGenerator[Event | None, None]:
-        return self._subscription.subscribe()
+    @property
+    def subscription(self) -> Subscription[Event | None]:
+        return self._subscription
 
     def get(self, node_id: str) -> PeerConnection:
         if node_id not in self.clients:
