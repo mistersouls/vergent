@@ -74,7 +74,7 @@ class LogicalPartition:
 
     @property
     def strong_id(self) -> str:
-        return f"{self.pid}-{self.start:0x32}:{self.end}"
+        return f"{self.pid}-{self.start:0x32}:{self.end:0x32}"
 
     def contains(self, h: int) -> bool:
         """Reports whether the hash h belongs to this partition."""

@@ -1,0 +1,4 @@
+
+
+class InternalError(Exception):
+    pass

@@ -29,7 +29,7 @@ class Membership:
             "address": self.address,
             # "status": self.status,
             "epoch": self.epoch,
-            "size": self.size.name
+            "size": self.size.name,
         }
 
 @dataclass

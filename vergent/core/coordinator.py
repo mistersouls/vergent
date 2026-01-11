@@ -1,48 +1,24 @@
 import asyncio
 import logging
-import uuid
 
+from vergent.core.exception import InternalError
 from vergent.core.model.event import Event
 from vergent.core.model.partition import Partitioner
+from vergent.core.model.request import PutRequest
 from vergent.core.model.state import PeerState
 from vergent.core.model.vnode import VNode
 from vergent.core.p2p.connection import PeerConnectionPool
-from vergent.core.p2p.conflict import ValueVersion, ConflictResolver
+from vergent.core.p2p.conflict import ValueVersion
 from vergent.core.storage.versionned import VersionedStorage
 from vergent.core.sub import Subscription
 
 
-class PendingWrite:
-    def __init__(
-        self,
-        request_id: str,
-        quorum_write: int,
-        loop: asyncio.AbstractEventLoop
-    ) -> None:
-        self.request_id = request_id
-        self.quorum_write = quorum_write
-        self.success = 0
-        self.failed = 0
-        self.future: asyncio.Future[bool] = loop.create_future()
-
-    def ack_success(self) -> None:
-        if not self.future.done():
-            self.success += 1
-            if self.success >= self.quorum_write:
-                self.future.set_result(True)
-
-    def ack_failure(self) -> None:
-        if not self.future.done():
-            self.failed += 1
-
-
-class PendingRead:
-    def __init__(self, request_id: str, quorum_read: int, loop: asyncio.AbstractEventLoop):
-        self.request_id = request_id
-        self.quorum_read = quorum_read
+class Pending:
+    def __init__(self, quorum: int, loop: asyncio.AbstractEventLoop):
+        self.quorum = quorum
         self.responses: list[ValueVersion] = []
         self.failed = 0
-        self.future: asyncio.Future[ValueVersion | None] = loop.create_future()
+        self.future: asyncio.Future[list[ValueVersion]] = loop.create_future()
 
     def ack_success(self, version: ValueVersion) -> None:
         if self.future.done():
@@ -50,20 +26,20 @@ class PendingRead:
 
         self.responses.append(version)
 
-        if len(self.responses) >= self.quorum_read:
-            winner = ConflictResolver.resolve(self.responses)
-            self.future.set_result(winner)
+        # When we reach quorum, complete the future with all collected versions.
+        if len(self.responses) >= self.quorum:
+            self.future.set_result(self.responses)
 
     def ack_failure(self) -> None:
         if self.future.done():
             return
         self.failed += 1
+        # You might later decide to fail early if too many failures occur.
 
 
 class Coordinator:
     def __init__(
         self,
-        node_id: str,
         state: PeerState,
         peers: PeerConnectionPool,
         partitioner: Partitioner,
@@ -72,7 +48,6 @@ class Coordinator:
         replication_factor: int,
         loop: asyncio.AbstractEventLoop,
     ) -> None:
-        self._local_node_id = node_id
         self._state = state
         self._peers = peers
         self._partitioner = partitioner
@@ -83,295 +58,185 @@ class Coordinator:
 
         self._logger = logging.getLogger("vergent.core.coordinator")
 
-        self._pending: dict[str, PendingWrite | PendingRead] = {}
+        # request_id -> Pending
+        self._pending: dict[str, Pending] = {}
         self._event_task = self._loop.create_task(self._event_loop())
         self._background_tasks: set[asyncio.Task] = set()
+
+    @property
+    def local_node_id(self) -> str:
+        return self._state.membership.node_id
 
     def on_event(self, event: Event) -> None:
         payload = event.payload
         request_id = payload.get("request_id")
 
-        if request_id and event.type in ("ok", "ko"):
-            pending = self._pending.get(request_id)
+        if not request_id or event.type not in ("ok", "ko"):
+            return
 
-            if not pending:
-                return # late
+        pending = self._pending.get(request_id)
+        if not pending:
+            # Late response or already cleaned up.
+            return
 
-            if isinstance(pending, PendingWrite) and event.type== "ok":
-                pending.ack_success()
-            elif isinstance(pending, PendingRead) and event.type== "ok":
-                pending.ack_success(payload.get("version"))
-            else:
+        if event.type == "ok":
+            version_payload = payload.get("version")
+            if version_payload is None:
+                self._logger.warning(
+                    "Received ok without version for request_id=%s", request_id
+                )
                 pending.ack_failure()
+                return
 
-    async def coordinate_delete(
-        self,
-        key: bytes,
-        primary: VNode,
-        quorum_write: int,
-        timeout: float,
-    ) -> bool:
+            try:
+                version = ValueVersion.from_dict(version_payload)
+            except Exception as ex:
+                self._logger.error(
+                    "Failed to decode version for request_id=%s: %s",
+                    request_id,
+                    ex,
+                    exc_info=ex,
+                )
+                pending.ack_failure()
+                return
+
+            pending.ack_success(version)
+        else:
+            pending.ack_failure()
+
+    async def put(self, request: PutRequest) -> Event:
+        """
+        Handle a client PUT request.
+
+        The local node either coordinates the write (if it is in charge
+        of this key) or forwards the request to the appropriate primary
+        coordinator.
+        """
+        primary = self.find_key_owner(request.key)
+
+        if self.local_node_id != primary.node_id:
+            return await self.forward_put(request, primary)
+
+        return await self.coordinate_put(request, primary)
+
+    async def coordinate_put(self, request: PutRequest, primary: VNode) -> Event:
+        """
+        Coordinate a PUT for which this node is the primary in the preference list.
+        """
         ring = self._state.ring
         replicas = ring.preference_list(primary, self._replication_factor)
 
-        request_id = str(uuid.uuid4())
-        pending = PendingWrite(request_id, quorum_write, self._loop)
+        request_id = request.request_id
+        timeout = request.timeout
+
+        pending = Pending(request.quorum_write, self._loop)
         self._pending[request_id] = pending
 
-        local_version = await self._delete_local(pending, key)
-        if local_version is None:
-            self._pending.pop(request_id, None)
-            return False
+        try:
+            # 1. Perform local write and count it toward quorum.
+            local_version = await self._put_local(pending, request)
 
-        replicate_event = Event(
-            type="replicate",
-            payload={
-                "key": key,
-                "version": local_version.to_dict(),
-                "request_id": request_id,
-            },
-        )
+            # 2. Replicate to other replicas.
+            replicate_event = Event(
+                type="replicate",
+                payload={
+                    "key": request.key,
+                    "version": local_version.to_dict(),
+                    "request_id": request_id,
+                },
+            )
 
-        for replica in replicas:
-            if replica.node_id == self._local_node_id:
-                continue
-            transport = self._peers.get(replica.node_id)
-            task = self._loop.create_task(transport.send(replicate_event))
-            self._track_task(task)
-
-        return await self._write_ack(pending, request_id, timeout)
-
-    async def coordinate_get(
-        self,
-        key: bytes,
-        primary: VNode,
-        quorum_read: int,
-        timeout: float,
-    ) -> bytes | None:
-        ring = self._state.ring
-        replicas = ring.preference_list(primary, self._replication_factor)
-
-        request_id = str(uuid.uuid4())
-        pending = PendingRead(request_id, quorum_read, self._loop)
-        self._pending[request_id] = pending
-
-        local_version = await self._storage.get_version(key)
-        if local_version:
-            pending.ack_success(local_version)
-
-        read_event = Event(
-            type="get",
-            payload={
-                "key": key,
-                "request_id": request_id,
-            },
-        )
-
-        for replica in replicas:
-            if replica.node_id != self._local_node_id:
+            for replica in replicas:
+                if replica.node_id == self.local_node_id:
+                    continue
                 transport = self._peers.get(replica.node_id)
-                task = self._loop.create_task(transport.send(read_event))
-                self._track_task(task)
+                # We do not await here; we track it as a background task.
+                self._track_task(self._loop.create_task(transport.send(replicate_event)))
 
-        winner = await self._read_ack(pending, request_id, timeout)
+            # 3. Wait for W responses (including local).
+            versions = await self._write_ack(pending, request_id, timeout)
+            if versions:
+                # For now, just return one version (e.g. the local or first).
+                version = versions[0]
+                payload = {"version": version.to_dict(), "request_id": request_id}
+                return Event(type="ok", payload=payload)
 
-        # Read-repair
-        if local_version and winner and winner.hlc > local_version.hlc:
-            await self._storage.apply_remote_version(key, winner)
+            raise InternalError("Expected at least 1 version but got 0.")
+        except asyncio.TimeoutError:
+            message = f"Timeout exceeded: {timeout}"
+            self._logger.warning(
+                "PUT coordination timed out for request_id=%s: %s",
+                request_id,
+                message,
+            )
+            return Event(type="ko", payload={"message": message, "request_id": request_id})
+        except InternalError as ex:
+            self._logger.error(
+                "Internal error during PUT coordination for request_id=%s: %s",
+                request_id,
+                ex,
+                exc_info=ex,
+            )
+            return Event(type="ko", payload={"message": str(ex), "request_id": request_id})
 
-        return None if (winner is None or winner.is_tombstone) else winner.value
+        # Hinted hand-off can be implemented later.
 
-    async def coordinate_put(
-        self,
-        key: bytes,
-        value: bytes,
-        primary: VNode,
-        quorum_write: int,
-        timeout: float
-    ) -> bool:
-        ring = self._state.ring
-        replicas = ring.preference_list(primary, self._replication_factor)
+    async def forward_put(self, request: PutRequest, primary: VNode) -> Event:
+        """
+        Forward the PUT to the primary coordinator and wait for its result.
 
-        request_id = str(uuid.uuid4())
-        pending = PendingWrite(request_id, quorum_write, self._loop)
-        self._pending[request_id] = pending
+        From the forwarding node perspective, we only need one response:
+        the primary's result (which itself is based on its own quorum).
+        """
+        request_id = request.request_id
 
-        local_version = await self._put_local(pending, key, value)
-        if local_version is None:
-            self._pending.pop(request_id, None)
-            return False
-
-        replicate_event = Event(
-            type="replicate",
-            payload={"key": key, "version": local_version}
-        )
-        for replica in replicas:
-            if replica.node_id != self._local_node_id:
-                transport = self._peers.get(replica.node_id)
-                self._track_task(asyncio.create_task(transport.send(replicate_event)))
-
-        return await self._write_ack(pending, request_id, timeout)
-
-        # Hinted hand-off later
-
-    async def forward_delete(
-        self,
-        primary: VNode,
-        key: bytes,
-        quorum_write: int,
-        timeout: float,
-    ) -> bool:
-        request_id = str(uuid.uuid4())
-        pending = PendingWrite(request_id, quorum_write, self._loop)
-        self._pending[request_id] = pending
-
-        payload = {
-            "kind": "delete",
-            "key": key,
-            "W": quorum_write,
-            "request_id": request_id,
-        }
-        event = Event(type="forward", payload=payload)
-
-        transport = self._peers.get(primary.node_id)
-        await transport.send(event)
-        return await self._write_ack(pending, request_id, timeout)
-
-    async def forward_get(
-        self,
-        primary: VNode,
-        key: bytes,
-        quorum_read: int,
-        timeout: float,
-    ) -> bytes | None:
-
-        request_id = str(uuid.uuid4())
-        pending = PendingRead(request_id, quorum_read, self._loop)
-        self._pending[request_id] = pending
-
-        payload = {
-            "kind": "get",
-            "key": key,
-            "R": quorum_read,
-            "request_id": request_id,
-        }
-        event = Event(type="forward", payload=payload)
-
-        transport = self._peers.get(primary.node_id)
-        await transport.send(event)
-        winner = await self._read_ack(pending, request_id, timeout)
-
-        return None if winner.is_tombstone else winner.value
-
-    async def forward_put(
-        self,
-        primary: VNode,
-        key: bytes,
-        value: bytes,
-        quorum_write: int,
-        timeout: float
-    ) -> bool:
         payload = {
             "kind": "put",
-            "key": key,
-            "value": value,
-            "W": quorum_write,
+            "key": request.key,
+            "value": request.value,
+            "W": request.quorum_write,
+            "request_id": request_id,
+            "timeout": request.timeout,
         }
         event = Event(type="forward", payload=payload)
         transport = self._peers.get(primary.node_id)
-        request_id = str(uuid.uuid4())
-        pending = PendingWrite(request_id, quorum_write, self._loop)
+
+        # From this node's perspective, quorum is 1: the primary's response.
+        pending = Pending(1, self._loop)
         self._pending[request_id] = pending
+
         await transport.send(event)
-        return await self._write_ack(pending, request_id, timeout)
 
-    async def get(
-        self,
-        key: bytes,
-        quorum_read: int,
-        timeout: float,
-    ) -> bytes | None:
+        try:
+            versions = await self._write_ack(pending, request_id, request.timeout)
+            if versions:
+                version = versions[0]
+                payload = {"version": version.to_dict(), "request_id": request_id}
+                return Event(type="ok", payload=payload)
+            raise InternalError("Expected 1 version but got 0.")
+        except asyncio.TimeoutError:
+            message = f"Timeout exceeded: {request.timeout}"
+            self._logger.warning(
+                "PUT forward timed out for request_id=%s: %s",
+                request_id,
+                message,
+            )
+            return Event(type="ko", payload={"message": message, "request_id": request_id})
+        except InternalError as ex:
+            self._logger.error(
+                "Internal error during PUT forward for request_id=%s: %s",
+                request_id,
+                ex,
+                exc_info=ex,
+            )
+            return Event(type="ko", payload={"message": str(ex), "request_id": request_id})
+
+    def find_key_owner(self, key: bytes) -> VNode:
         ring = self._state.ring
         placement = self._partitioner.find_placement_by_key(key, ring)
-        primary = placement.vnode
+        return placement.vnode
 
-        if self._local_node_id != primary.node_id:
-            return await self.forward_get(
-                primary,
-                key,
-                quorum_read,
-                timeout,
-            )
-
-        return await self.coordinate_get(
-            key,
-            primary,
-            quorum_read,
-            timeout,
-        )
-
-    async def put(
-        self,
-        key: bytes,
-        value: bytes,
-        quorum_write: int,
-        timeout: float
-    ) -> bool:
-        """
-        replication_factor (N)
-        quorum_write (W)
-        """
-        ring = self._state.ring
-        placement = self._partitioner.find_placement_by_key(key, ring)
-        primary = placement.vnode
-
-        if self._local_node_id != primary.node_id:
-            return await self.forward_put(
-                primary,
-                key,
-                value,
-                quorum_write,
-                timeout
-            )
-
-        return await self.coordinate_put(
-            key,
-            value,
-            primary,
-            quorum_write,
-            timeout
-        )
-
-    async def delete(
-        self,
-        key: bytes,
-        quorum_write: int,
-        timeout: float,
-    ) -> bool:
-        """
-        replication_factor (N)
-        quorum_write (W)
-        """
-        ring = self._state.ring
-        placement = self._partitioner.find_placement_by_key(key, ring)
-        primary = placement.vnode
-
-        if self._local_node_id != primary.node_id:
-            return await self.forward_delete(
-                primary,
-                key,
-                quorum_write,
-                timeout,
-            )
-
-        return await self.coordinate_delete(
-            key,
-            primary,
-            quorum_write,
-            timeout,
-        )
-
-    async def close(self):
+    async def close(self) -> None:
         # 1. Stop event loop
         self._event_task.cancel()
         try:
@@ -385,25 +250,11 @@ class Coordinator:
         await asyncio.gather(*self._background_tasks, return_exceptions=True)
         self._background_tasks.clear()
 
-        # 3. Cancel pending writes
+        # 3. Cancel pending operations
         for pending in self._pending.values():
             if not pending.future.done():
                 pending.future.cancel()
         self._pending.clear()
-
-    async def _delete_local(
-        self,
-        pending: PendingWrite,
-        key: bytes,
-    ) -> ValueVersion | None:
-        try:
-            version = await self._storage.delete_local(key)
-            pending.ack_success()
-            return version
-        except Exception as ex:
-            self._logger.error(f"Unable to delete locally '{key}': {ex}")
-            pending.ack_failure()
-            return None
 
     async def _event_loop(self) -> None:
         async for event in self._subscription:
@@ -411,19 +262,23 @@ class Coordinator:
                 break
             self.on_event(event)
 
-    async def _put_local(
-        self,
-        pending: PendingWrite,
-        key: bytes,
-        value: bytes
-    ) -> ValueVersion | None:
+    async def _put_local(self, pending: Pending, request: PutRequest) -> ValueVersion:
+        """
+        Perform the local PUT and count it toward the quorum.
+        """
+        key = request.key
+        value = request.value
+
         try:
             version = await self._storage.put_local(key, value)
-            pending.ack_success()
+            pending.ack_success(version)
             return version
         except Exception as ex:
-            self._logger.error(f"Unable to put locally '{key}': {ex}")
+            self._logger.error(
+                "Unable to put locally '%s': %s", key, ex, exc_info=ex
+            )
             pending.ack_failure()
+            raise InternalError(f"Internal error while putting locally '{key}'") from ex
 
     def _track_task(self, task: asyncio.Task) -> None:
         self._background_tasks.add(task)
@@ -431,26 +286,18 @@ class Coordinator:
 
     async def _write_ack(
         self,
-        pending: PendingWrite,
+        pending: Pending,
         request_id: str,
-        timeout: float
-    ) -> bool:
-        try:
-            return await asyncio.wait_for(pending.future, timeout=timeout)
-        except asyncio.TimeoutError:
-            return False
-        finally:
-            self._pending.pop(request_id, None)
+        timeout: float,
+    ) -> list[ValueVersion]:
+        """
+        Wait for quorum acknowledgments or timeout.
 
-    async def _read_ack(
-        self,
-        pending: PendingRead,
-        request_id: str,
-        timeout: float
-    ) -> ValueVersion | None:
+        Cleanup of the pending entry is centralized here to avoid races
+        and double-removal.
+        """
         try:
             return await asyncio.wait_for(pending.future, timeout=timeout)
-        except asyncio.TimeoutError:
-            return None
         finally:
+            # Ensure we always clean up the pending map for this request.
             self._pending.pop(request_id, None)

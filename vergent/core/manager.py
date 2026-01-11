@@ -83,7 +83,18 @@ class PeerManager:
         # Wait for join event
         if self.should_join:
             self._logger.info("Waiting for JOIN event before starting gossip")
-            await self._join_event.wait()
+            join_wait_task = asyncio.create_task(self._join_event.wait())
+            stop_task = asyncio.create_task(stop_event.wait())
+            await asyncio.wait(
+                [join_wait_task, stop_task],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if stop_event.is_set():
+                self._logger.info("Stop event received, cancel waiting for JOIN")
+                join_wait_task.cancel()
+                return
+
+            stop_task.cancel()
 
         # Add ourselves to the view
         self._logger.info("Starting in single-node mode")
@@ -95,6 +106,8 @@ class PeerManager:
 
     async def shutdown(self) -> None:
         await self._bucket_syncer.stop()
+        self._internal_incoming.publish(None)
+        self._conns.subscription.publish(None)
 
         if self._state.tasks:
             self._logger.info("Waiting for background tasks to complete.")

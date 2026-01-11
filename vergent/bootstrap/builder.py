@@ -59,7 +59,6 @@ class CoreBuilder:
         )
 
         coordinator = Coordinator(
-            node_id=self.config.node.id,
             peers=peer_clients,
             state=peer_state,
             partitioner=partitioner,

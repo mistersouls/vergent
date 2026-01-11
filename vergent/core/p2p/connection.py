@@ -61,7 +61,11 @@ class PeerConnection:
 
         frame = event.to_frame()
         self._writer.write(frame)
-        await self._writer.drain()
+
+        try:
+            await self._writer.drain()
+        except ConnectionResetError as ex:
+            self._logger.error(f"Connection reset by {self._address}: {ex}")
 
     async def recv(self) -> None:
         try:
@@ -80,8 +84,8 @@ class PeerConnection:
             self._logger.info(f"Peer {self._address} disconnected")
         except Exception as ex:
             self._logger.error(f"Error received for {self._address}: {ex}", exc_info=ex)
-        finally:
-            await self.close()
+        # finally:
+        #     await self.close()
 
     async def close(self) -> None:
         self.connected = False

@@ -4,11 +4,9 @@ from functools import lru_cache
 from pydantic import ValidationError
 
 from vergent.bootstrap.builder import CoreBuilder
-from vergent.bootstrap.config.loader import get_cli_args
 from vergent.bootstrap.config.settings import VergentConfig
 from vergent.core.app import App
 from vergent.core.facade import VergentCore
-from vergent.core.p2p.manager import PeerManager
 
 
 @lru_cache
@@ -21,19 +19,6 @@ def get_api_app() -> App:
 def get_peer_app() -> App:
     app = App()
     return app
-
-
-@lru_cache
-def get_peer_manager() -> PeerManager:
-    args = get_cli_args()
-    peers = set(args.peers or [])
-    peer_manager = PeerManager(
-        peers=peers,
-        listen=get_advertise_address(),
-        storage=get_versioned_storage(),
-        ssl_ctx=get_client_ssl_ctx(),
-    )
-    return peer_manager
 
 
 @lru_cache

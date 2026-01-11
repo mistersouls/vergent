@@ -1,5 +1,6 @@
 from vergent.bootstrap.deps import get_peer_app, get_core
 from vergent.core.model.event import Event
+from vergent.core.model.request import PutRequest
 from vergent.core.p2p.conflict import ValueVersion
 
 
@@ -40,8 +41,13 @@ async def replicate(data: dict) -> Event:
     storage = core.storage
     key = data["key"]
     version = ValueVersion.from_dict(data["version"])
-    await storage.apply_remote_version(key, version)
-    return Event(type="ok", payload={"hlc": version.hlc.to_dict(), "source": core.peer_config.advertised_listener})
+    new_version = await storage.apply_remote_version(key, version)
+    payload = {
+        "version": new_version,
+        "request_id": data.get("request_id"),
+        "source": core.peer_config.advertised_listener,
+    }
+    return Event(type="ok", payload=payload)
 
 
 @app.request("sync")
@@ -82,3 +88,43 @@ async def sync(data: dict) -> Event:
             })
         case _:
             return Event(type="error", payload={"message": f"Unknow kind sync {kind}"})
+
+
+@app.request("forward")
+async def forward(data: dict) -> Event:
+    core = get_core()
+    kind = data["kind"]
+    match kind:
+        case "put":
+            key = data["key"]
+            request_id = data["request_id"]
+            owner = core.coordinator.find_key_owner(key)
+            node_id = core.peer_state.membership.node_id
+            if owner.node_id != node_id:
+                return Event(
+                    type="ko",
+                    payload={
+                        "message": f"The node {node_id} is not owner of {key}",
+                        "request_id": request_id
+                    }
+                )
+
+            request = PutRequest(
+                request_id=request_id,
+                key=key,
+                value=data["value"],
+                quorum_write=data["W"],
+                timeout=data["timeout"],
+            )
+            return await core.coordinator.coordinate_put(request, owner)
+        case "get":
+            res = await core.coordinator.get(data["key"], data["R"], 0.05)
+
+        case _:
+            return Event(
+                type="error",
+                payload={
+                    "message": f"Unknow kind {kind}",
+                    "request_id": data.get("request_id"),
+                }
+            )

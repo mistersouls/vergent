@@ -24,9 +24,6 @@ def scan(package: str):
             # The function itself is usually a no-op, but we call it anyway
             return func(*args, **kwargs)
 
-        # Trigger the scan immediately when the module is imported
-        wrapper()
-
         return wrapper
 
     return decorator
