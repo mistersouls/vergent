@@ -162,7 +162,10 @@ class PeerManager:
         remote_memberships = event.payload.get("memberships", {})
         bucket_id = event.payload.get("bucket_id")
         peer_id = event.payload.get("peer_id")
-        memberships = [Membership(**m) for m in remote_memberships.values()]
+        memberships = [
+            Membership.from_dict(m)
+            for m in remote_memberships.values()
+        ]
         diff = self._bucket_syncer.sync_memberships(bucket_id, peer_id, memberships)
         if diff.changed:
             self._update_ring(diff)
@@ -216,7 +219,7 @@ class PeerManager:
 
         for membership in memberships:
             self._view.add_or_update(membership)
-            vnodes.extend(VNode.generate_vnodes(membership.node_id, membership.size.value))
+            vnodes.extend(VNode.generate_vnodes(membership.node_id, membership.tokens))
 
         old_ring = Ring(vnodes)
         local_vnodes = self._state.vnodes
@@ -269,43 +272,33 @@ class PeerManager:
     def _update_ring(self, diff: MembershipDiff) -> None:
         ring = self._state.ring
 
+        # 1. Remove nodes that disappeared
         removed_node_ids = {m.node_id for m in diff.removed}
-        vnodes_to_add: list[VNode] = []
-        # Collect trims (size decreases)
-        trims: dict[str, int] = {}
+        if removed_node_ids:
+            ring = ring.drop_nodes(removed_node_ids)
 
+        # 2. Apply updates (replace tokens)
         for change in diff.updated:
             before = change.before
             after = change.after
 
-            if after.size > before.size:
-                delta = after.size.value - before.size.value
-                vnodes_to_add.extend(VNode.generate_vnodes(after.node_id, delta))
+            # Remove old tokens
+            ring = ring.drop_nodes({before.node_id})
 
-            elif after.size < before.size:
-                delta = before.size.value - after.size.value
-                trims[after.node_id] = trims.get(after.node_id, 0) + delta
+            # Add new tokens
+            ring = ring.add_vnodes(VNode.generate_vnodes(after.node_id, after.tokens))
 
-
+        # 3. Add new nodes
         for membership in diff.added:
-            vnodes_to_add.extend(
-                VNode.generate_vnodes(membership.node_id, membership.size.value)
+            ring = ring.add_vnodes(
+                VNode.generate_vnodes(membership.node_id, membership.tokens)
             )
-
-        if removed_node_ids:
-            ring = ring.drop_nodes(removed_node_ids)
-
-        if trims:
-            ring = ring.trim_nodes(trims)
-
-        if vnodes_to_add:
-            ring = ring.add_vnodes(vnodes_to_add)
 
         self._state.ring = ring
 
         self._logger.info(
             f"Ring updated from bucket {diff.bucket_id}: "
-            f"+{len(diff.added)} added, "
-            f"-{len(diff.removed)} removed, "
+            f"{len(diff.added)} added, "
+            f"{len(diff.removed)} removed, "
             f"{len(diff.updated)} updated"
         )

@@ -15,6 +15,7 @@ from vergent.core.model.state import PeerState
 from vergent.core.model.vnode import VNode
 from vergent.core.p2p.connection import PeerConnectionPool
 from vergent.core.ring import Ring
+from vergent.core.space import HashSpace
 from vergent.core.storage.partitionned import PartitionedStorage
 from vergent.core.storage.versionned import VersionedStorage
 from vergent.core.sub import Subscription
@@ -92,10 +93,17 @@ class CoreBuilder:
             self._validate_meta(meta)
             return meta
 
+        node_id = self.config.node.id
+        size = self.config.node.size
+        tokens = [
+            HashSpace.random_token(node_id)
+            for _ in range(size.value)
+        ]
         meta = VNodeMeta(
             version=1,
-            node_id=self.config.node.id,
-            size=self.config.node.size,
+            node_id=node_id,
+            size=size,
+            tokens=tokens,
         )
 
         meta.save(path)
@@ -160,13 +168,13 @@ class CoreBuilder:
 
     def _build_peer_state(self, config: PeerConfig) -> PeerState:
         meta = self._load_or_generate_meta()
-        vnodes = VNode.generate_vnodes(meta.node_id, meta.size.value)
+        vnodes = VNode.generate_vnodes(meta.node_id, meta.tokens)
         ring = Ring(vnodes)
         membership = Membership(
             node_id=meta.node_id,
             address=config.advertised_listener,
             size=meta.size,
-            # state="dead"
+            tokens=meta.tokens
         )
         state = PeerState(
             membership=membership,

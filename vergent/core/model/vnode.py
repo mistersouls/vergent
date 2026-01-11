@@ -44,8 +44,8 @@ class VNode(tuple):
         return cls(token, node_id)
 
     @classmethod
-    def generate_vnodes(cls, node_id: str, size: int) -> list[VNode]:
-        return [cls.random_vnode(node_id) for _ in range(size)]
+    def generate_vnodes(cls, node_id: str, tokens: list[int]) -> list[VNode]:
+        return [cls(token, node_id) for token in tokens]
 
     def repr_token(self) -> str:
         int_token = str(self.token)

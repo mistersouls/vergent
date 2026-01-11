@@ -155,7 +155,10 @@ class SeedBootstrapper:
 
             if remote_bucket_id in buckets:
                 del buckets[remote_bucket_id]
-                memberships.extend(Membership(**c) for c in remote_memberships.values())
+                memberships.extend(
+                    Membership.from_dict(c)
+                    for c in remote_memberships.values()
+                )
 
             if not buckets:
                 break

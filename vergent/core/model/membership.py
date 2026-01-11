@@ -10,27 +10,39 @@ MemberShipState = Literal["alive", "suspect", "dead"]
 class Membership:
     node_id: str
     address: str
-    # state: MemberShipState
     size: SizeClass
+    tokens: list[int]
     epoch: int = 0
 
     def __post_init__(self) -> None:
         if isinstance(self.size, str):
             self.size = SizeClass[self.size]
 
-    # def update_status(self, status: MemberShipStatus) -> None:
-    #     if status != self.status:
-    #         self.status = status
-    #         self.epoch += 1
-
     def to_dict(self) -> dict:
         return {
             "node_id": self.node_id,
             "address": self.address,
-            # "status": self.status,
             "epoch": self.epoch,
             "size": self.size.name,
+            "tokens": [f"{t:032x}" for t in self.tokens],
         }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> Membership:
+        size = data["size"]
+        if isinstance(size, str):
+            size = SizeClass[size]
+
+        tokens_hex = data["tokens"]
+        tokens = [int(h, 16) for h in tokens_hex]
+
+        return cls(
+            node_id=data["node_id"],
+            address=data["address"],
+            epoch=data.get("epoch", 0),
+            size=size,
+            tokens=tokens,
+        )
 
 @dataclass
 class MembershipChange:
