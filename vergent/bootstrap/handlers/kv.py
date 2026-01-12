@@ -2,7 +2,7 @@ import msgpack
 
 from vergent.bootstrap.deps import get_api_app, get_core
 from vergent.core.model.event import Event
-from vergent.core.model.request import PutRequest
+from vergent.core.model.request import PutRequest, GetRequest
 
 app = get_api_app()
 
@@ -10,8 +10,13 @@ app = get_api_app()
 @app.request("get")
 async def get(data: dict) -> Event:
     core = get_core()
-    versions = await core.coordinator.get(data["key"].encode(), 1, 0.05)
-    return Event(type="ok", payload={"versions": versions})
+    request = GetRequest(
+        request_id=data["request_id"],
+        key=data["key"].encode(),
+        quorum_read=2,
+        timeout=0.05
+    )
+    return await core.coordinator.get(request)
 
 
 @app.request("put")
@@ -22,7 +27,7 @@ async def put(data: dict) -> Event:
         request_id=data["request_id"],
         key=data["key"].encode(),
         value=value,
-        quorum_write=1,
+        quorum_write=2,
         timeout=0.05
     )
     return await core.coordinator.put(request)

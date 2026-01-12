@@ -1,6 +1,6 @@
 from vergent.bootstrap.deps import get_peer_app, get_core
 from vergent.core.model.event import Event
-from vergent.core.model.request import PutRequest
+from vergent.core.model.request import PutRequest, GetRequest
 from vergent.core.p2p.conflict import ValueVersion
 
 
@@ -67,12 +67,6 @@ async def sync(data: dict) -> Event:
                     "bucket_id": bucket_id,
                 }
             )
-        case "digest":
-            digest = await storage.compute_digest()
-            return Event(type="sync/digest", payload={
-                "digest": digest,
-                "source": core.peer_config.advertised_listener,
-            })
         case "fetch":
             keys = data.get("keys", [])
             versions = {}
@@ -85,6 +79,7 @@ async def sync(data: dict) -> Event:
             return Event(type="sync/fetch", payload={
                 "versions": versions,
                 "source": core.peer_config.advertised_listener,
+                "request_id": data.get("request_id"),
             })
         case _:
             return Event(type="error", payload={"message": f"Unknow kind sync {kind}"})
@@ -94,21 +89,21 @@ async def sync(data: dict) -> Event:
 async def forward(data: dict) -> Event:
     core = get_core()
     kind = data["kind"]
+    key = data["key"]
+    request_id = data["request_id"]
+    owner = core.coordinator.find_key_owner(key)
+    node_id = core.peer_state.membership.node_id
+    if owner.node_id != node_id:
+        return Event(
+            type="ko",
+            payload={
+                "message": f"The node {node_id} is not owner of {key}",
+                "request_id": request_id
+            }
+        )
+
     match kind:
         case "put":
-            key = data["key"]
-            request_id = data["request_id"]
-            owner = core.coordinator.find_key_owner(key)
-            node_id = core.peer_state.membership.node_id
-            if owner.node_id != node_id:
-                return Event(
-                    type="ko",
-                    payload={
-                        "message": f"The node {node_id} is not owner of {key}",
-                        "request_id": request_id
-                    }
-                )
-
             request = PutRequest(
                 request_id=request_id,
                 key=key,
@@ -118,8 +113,13 @@ async def forward(data: dict) -> Event:
             )
             return await core.coordinator.coordinate_put(request, owner)
         case "get":
-            res = await core.coordinator.get(data["key"], data["R"], 0.05)
-
+            request = GetRequest(
+                request_id=request_id,
+                key=key,
+                quorum_read=data["R"],
+                timeout=data["timeout"],
+            )
+            return await core.coordinator.coordinate_get(request, owner)
         case _:
             return Event(
                 type="error",

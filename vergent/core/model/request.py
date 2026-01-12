@@ -8,3 +8,11 @@ class PutRequest:
     value: bytes
     quorum_write: int
     timeout: float
+
+
+@dataclass
+class GetRequest:
+    request_id: str
+    key: bytes
+    quorum_read: int
+    timeout: float
