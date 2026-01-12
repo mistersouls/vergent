@@ -1,6 +1,6 @@
 from vergent.bootstrap.deps import get_peer_app, get_core
 from vergent.core.model.event import Event
-from vergent.core.model.request import PutRequest, GetRequest
+from vergent.core.model.request import PutRequest, GetRequest, DeleteRequest
 from vergent.core.p2p.conflict import ValueVersion
 
 
@@ -120,6 +120,14 @@ async def forward(data: dict) -> Event:
                 timeout=data["timeout"],
             )
             return await core.coordinator.coordinate_get(request, owner)
+        case "delete":
+            request = DeleteRequest(
+                request_id=request_id,
+                key=key,
+                quorum_write=data["W"],
+                timeout=data["timeout"],
+            )
+            return await core.coordinator.coordinate_delete(request, owner)
         case _:
             return Event(
                 type="error",

@@ -2,7 +2,7 @@ import msgpack
 
 from vergent.bootstrap.deps import get_api_app, get_core
 from vergent.core.model.event import Event
-from vergent.core.model.request import PutRequest, GetRequest
+from vergent.core.model.request import PutRequest, GetRequest, DeleteRequest
 
 app = get_api_app()
 
@@ -36,7 +36,10 @@ async def put(data: dict) -> Event:
 @app.request("delete")
 async def delete(data: dict) -> Event:
     core = get_core()
-    key = data["key"].encode()
-    version = await core.coordinator.delete(key, 1, 0.05)
-    return Event(type="ok", payload={"version": version})
-
+    request = DeleteRequest(
+        request_id=data["request_id"],
+        key=data["key"].encode(),
+        quorum_write=2,
+        timeout=0.05
+    )
+    return await core.coordinator.delete(request)

@@ -1,13 +1,21 @@
 from dataclasses import dataclass
 
-
 @dataclass
-class PutRequest:
+class WriteRequest:
     request_id: str
     key: bytes
-    value: bytes
     quorum_write: int
     timeout: float
+
+
+@dataclass
+class PutRequest(WriteRequest):
+    value: bytes
+
+
+@dataclass
+class DeleteRequest(WriteRequest):
+    pass
 
 
 @dataclass
