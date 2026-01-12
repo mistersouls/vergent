@@ -1,0 +1,132 @@
+# =====================================================================
+# Node identity
+# =====================================================================
+node:
+  # [Required]
+  # Unique and stable identifier for this node within the cluster.
+  # This value must be globally unique and must not change across restarts.
+  # It is used as the node's identity in vnode ownership, routing,
+  # rebalance planning, and all cluster‑wide coordination.
+  # The identifier should be explicit (e.g., 'node-1', 'db-a', 'shard-3') and
+  # must not depend on ephemeral properties such as IP address or hostname.
+  id: "node-1"
+
+  # [Default: L]
+  # Size class defining how many virtual slots (vnodes) this node receives
+  # when generating its vnode assignment for the first time.
+  #
+  # IMPORTANT:
+  #   - This value is used ONLY if the storage backend does NOT already contain
+  #     a persisted vnode list.
+  #   - Once a vnode list exists on disk, it becomes the authoritative source
+  #     of truth and this field is ignored.
+  #
+  # Allowed values:
+  #   XS  → 1 slot
+  #   S   → 2 slots
+  #   M   → 4 slots
+  #   L   → 8 slots
+  #   XL  → 16 slots
+  #   XXL → 32 slots
+  size: "L"
+
+
+# =====================================================================
+# Server settings (TCP + TLS)
+# =====================================================================
+server:
+  api:
+    # [Default: 127.0.0.1]
+    # Host/IP on which the client-facing API listens.
+    # This is the bind address used locally by the OS.
+    host: "127.0.0.1"
+
+    # [Default: 2000]
+    # TCP port for client requests (GET/PUT).
+    port: 2000
+
+  peer:
+    # [Default: 127.0.0.1]
+    # Host/IP on which the inter-node server listens.
+    host: "127.0.0.1"
+
+    # [Default: 12000]
+    # TCP port used for inter-node communication:
+    # join, leave, sync/view, replication, handoff, partition transfers.
+    port: 12000
+
+    # [Optional]
+    # Reachable address (host:port) advertised to other nodes.
+    # This is the canonical address peers will use to contact this node.
+    # If omitted, defaults to '<server.peer.host>:<server.peer.port>'.
+    listener: "127.0.0.1:12000"
+
+    # [Default: []]
+    # List of seed node addresses (host:port) used during bootstrap.
+    # At startup, this node will contact the listed seeds to obtain the current
+    # cluster membership and ring layout.
+    #
+    # Seeds are only used during bootstrap. After join, the node no longer
+    # depends on them.
+    seeds: []
+
+  tls:
+    # [Required]
+    # Path to the node's TLS certificate (PEM).
+    # Used for both client and peer servers.
+    certfile: ""
+
+    # [Required]
+    # Path to the node's TLS private key (PEM).
+    keyfile: ""
+
+    # [Required]
+    # Path to the CA certificate (PEM) used to verify client and peer certificates.
+    cafile: ""
+
+  # [Default: 128]
+  # Maximum number of pending TCP connections allowed by the OS.
+  backlog: 128
+
+  # [Default: 5.0]
+  # Maximum time (in seconds) allowed for a graceful shutdown.
+  timeout_graceful_shutdown: 5.0
+
+  # [Default: 1024]
+  # Maximum number of concurrent in-flight requests handled by the node.
+  limit_concurrency: 1024
+
+  # [Default: 4194304 (4MB)]
+  # Maximum allowed buffer size for incoming data (in bytes).
+  max_buffer_size: 4194304
+
+  # [Default: 1048576 (1MB)]
+  # Maximum allowed size for a single decoded message (in bytes).
+  max_message_size: 1048576
+
+
+# =====================================================================
+# Storage settings
+# =====================================================================
+storage:
+  # [Required]
+  # Directory where the node stores all persistent data.
+  # Must exist or be creatable, writable, and persistent across restarts.
+  data_dir: ""
+
+
+# =====================================================================
+# Placement / Ring configuration
+# =====================================================================
+placement:
+  # [Default: 16]
+  # Shift factor used to compute the total number of logical partitions (Q).
+  # Q = 1 << shift
+  #
+  # This value MUST remain stable for the lifetime of the cluster.
+  shift: 16
+
+  # [Default: 3]
+  # Number of distinct nodes that must store each partition.
+  # A replication_factor of N means each key is stored on N different nodes.
+  replication_factor: 3

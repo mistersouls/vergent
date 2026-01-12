@@ -1,20 +1,28 @@
 import asyncio
+from typing import AsyncGenerator
 
 
 class Subscription[T]:
     def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
         self._loop = loop
-        self.waiter = self._loop.create_future()
+        self.waiter = loop.create_future()
 
     def publish(self, value: T):
         waiter = self.waiter
         self.waiter = self._loop.create_future()
         waiter.set_result((value, self.waiter))
 
-    async def subscribe(self):
+    async def subscribe(self) -> AsyncGenerator[T, None]:
         waiter = self.waiter
         while True:
-            value, waiter = await waiter
-            yield value
+            try:
+                value, waiter = await asyncio.shield(waiter)
+                yield value
+            except StopAsyncIteration:
+                return
+
+    def close(self):
+        if not self.waiter.done():
+            self.waiter.set_exception(StopAsyncIteration())
 
     __aiter__ = subscribe

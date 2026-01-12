@@ -1,5 +1,4 @@
-from vergent import entrypoint, app
-
+from vergent.bootstrap.main import entrypoint
 
 if __name__ == '__main__':
-    entrypoint(app)
+    entrypoint()

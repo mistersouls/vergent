@@ -1,5 +1,6 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import AsyncIterator
 
 import lmdb
@@ -7,7 +8,7 @@ import lmdb
 from vergent.core.types_ import Storage
 
 
-class LMDBStorage(Storage):
+class LMDBStorage:
     def __init__(
         self,
         path: str,
@@ -29,32 +30,32 @@ class LMDBStorage(Storage):
             readahead=readahead,
         )
 
-    async def get(self, key: str) -> bytes | None:
+    async def get(self, key: bytes) -> bytes | None:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             self._executor,
             self._sync_get,
-            key.encode(),
+            key,
         )
 
-    async def put(self, key: str, value: bytes) -> None:
+    async def put(self, key: bytes, value: bytes) -> None:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             self._executor,
             self._sync_put,
-            key.encode(),
+            key,
             value
         )
 
-    async def delete(self, key: str) -> None:
+    async def delete(self, key: bytes) -> None:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             self._executor,
             self._sync_delete,
-            key.encode(),
+            key,
         )
 
-    async def iter(self, limit: int = -1, batch_size: int = 1024) -> AsyncIterator[tuple[str, bytes]]:
+    async def iter(self, limit: int = -1, batch_size: int = 1024) -> AsyncIterator[tuple[bytes, bytes]]:
         """
         Asynchronously iterate over all key/value pairs in LMDB.
 
@@ -82,7 +83,7 @@ class LMDBStorage(Storage):
 
             # Yield results asynchronously
             for key, value in batch:
-                yield key.decode(), value
+                yield key, value
 
                 if remaining is not None:
                     remaining -= 1
@@ -124,3 +125,33 @@ class LMDBStorage(Storage):
                     has_key = cursor.next()
 
         return items
+
+
+class LMDBStorageFactory:
+    def __init__(
+        self,
+        path: Path,
+        map_size: int = 1 << 30,
+        max_workers: int = 1,
+        readahead: bool = True,
+        writemap: bool = False,
+        sync: bool = False
+    ) -> None:
+        self._path = path
+        self._map_size = map_size
+        self._max_workers = max_workers
+        self._readahead = readahead
+        self._writemap = writemap
+        self._sync = sync
+
+    def create(self, sid: str) -> Storage:
+        path = self._path / sid
+        path.mkdir(exist_ok=True)
+        return LMDBStorage(
+            path=str(path),
+            map_size=self._map_size,
+            max_workers=self._max_workers,
+            readahead=self._readahead,
+            writemap=self._writemap,
+            sync=self._sync
+        )

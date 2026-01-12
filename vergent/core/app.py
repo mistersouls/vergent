@@ -1,4 +1,6 @@
+import copy
 import logging
+import uuid
 from typing import Callable
 
 from vergent.core.model.event import Event
@@ -25,7 +27,9 @@ class App:
                 continue
 
             try:
-                result = await handler(event.payload)
+                data = dict(event.payload)
+                data.setdefault("request_id", str(uuid.uuid4()))
+                result = await handler(data)
                 if result is not None:
                     await send(result)
             except Exception as exc:
