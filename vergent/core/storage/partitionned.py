@@ -10,7 +10,11 @@ class PartitionedStorage(Storage):
     based on the partitioning strategy.
     """
 
-    def __init__(self, storage_factory: StorageFactory, partitioner: Partitioner) -> None:
+    def __init__(
+        self,
+        storage_factory: StorageFactory,
+        partitioner: Partitioner,
+    ) -> None:
         """
         backends: mapping partition_id -> Storage backend
         placement: object with route(key: bytes) -> (partition, vnode)
@@ -19,43 +23,51 @@ class PartitionedStorage(Storage):
         self._storage_factory = storage_factory
         self._partitioner = partitioner
 
-    def _select_backend(self, key: bytes) -> Storage:
-        partition = self._partitioner.find_partition_by_key(key)
-        backend = self._backends.get(str(partition.pid))
+    def _select_backend(self, namespace: bytes) -> Storage:
+        env_id = self._env_id_for(namespace)
+        backend = self._backends.get(env_id)
         if backend is None:
-            backend = self._storage_factory.create(str(partition.pid))
+            backend = self._storage_factory.create(env_id)
+            self._backends[env_id] = backend
         return backend
 
-    async def get(self, key: bytes) -> bytes | None:
-        backend = self._select_backend(key)
-        return await backend.get(key)
+    def _env_id_for(self, namespace: bytes) -> str:
+        pid = int(namespace.decode("ascii"), 16)
+        env_index = pid // self._storage_factory.get_max_namespaces()
+        return str(env_index)
 
-    async def put(self, key: bytes, value: bytes) -> None:
-        backend = self._select_backend(key)
-        await backend.put(key, value)
+    async def get(self, namespace: bytes, key: bytes) -> bytes | None:
+        backend = self._select_backend(namespace)
+        return await backend.get(namespace, key)
 
-    async def delete(self, key: bytes) -> None:
-        backend = self._select_backend(key)
-        await backend.delete(key)
+    async def put(self, namespace: bytes, key: bytes, value: bytes) -> None:
+        backend = self._select_backend(namespace)
+        await backend.put(namespace, key, value)
+
+    async def put_many(self, namespace: bytes, items: list[tuple[bytes, bytes]]) -> None:
+        if not items:
+            return
+
+        backend = self._select_backend(namespace)
+        await backend.put_many(namespace, items)
+
+    async def delete(self, namespace: bytes, key: bytes) -> None:
+        backend = self._select_backend(namespace)
+        await backend.delete(namespace, key)
 
     async def iter(
         self,
+        namespace: bytes,
         limit: int = -1,
         batch_size: int = 1024
-    ) -> AsyncIterator[tuple[str, bytes]]:
-        """
-        Iterate over all partitions sequentially.
-        """
-        # fixme(souls): should be able to paginate
-        remaining = limit
-
-        for backend in self._backends.values():
+    ) -> AsyncIterator[tuple[bytes, bytes]]:
+        # _select_backend is not call here to optimize rebalancing.
+        # This avoids creating unnecessary LMDB environments
+        env_id = self._env_id_for(namespace)
+        if backend := self._backends.get(env_id):
             async for key, value in backend.iter(
-                limit=remaining,
+                namespace=namespace,
+                limit=limit,
                 batch_size=batch_size
             ):
                 yield key, value
-                if remaining > 0:
-                    remaining -= 1
-                    if remaining == 0:
-                        return

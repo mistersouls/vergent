@@ -70,6 +70,34 @@ server:
     # depends on them.
     seeds: []
 
+  replication:
+    # [Default: 0.0.0.0]
+    # Bind address for the replication server.
+    # Usually 0.0.0.0 so peers can reach it.
+    host: "127.0.0.1"
+
+    # [Default: 13000]
+    # TCP port dedicated to partition replication (FileReceiver).
+    # This port is used exclusively for binary partition transfers
+    # and is separate from the peer API (server.peer.port).
+    port: 13000
+
+    # [Optional]
+    # Public address advertised to other nodes for partition transfers.
+    # If omitted, defaults to "<replication.host>:<replication.port>".
+    listener: "127.0.0.1:13000"
+
+    # [Default: 4]
+    # Maximum number of concurrent incoming partition transfers.
+    # Each transfer uses one TCP connection and one SHA‑256 streaming pipeline.
+    max_concurrent_transfers: 4
+
+    # [Default: 30.0 seconds]
+    # Maximum allowed duration for a single file transfer.
+    # If exceeded, the transfer is aborted and the connection closed.
+    # 0 means no timeout
+    timeout_transfer: 3600.0
+
   tls:
     # [Required]
     # Path to the node's TLS certificate (PEM).
@@ -114,6 +142,12 @@ storage:
   # Must exist or be creatable, writable, and persistent across restarts.
   data_dir: ""
 
+  # [Optional: storage.data_dir]
+  # Directory where incoming partitions
+  # are written before being atomically swapped into place.
+  # If omitted, defaults to "<storage.data_dir>".
+  replication_dir: ""
+
 
 # =====================================================================
 # Placement / Ring configuration
@@ -130,3 +164,4 @@ placement:
   # Number of distinct nodes that must store each partition.
   # A replication_factor of N means each key is stored on N different nodes.
   replication_factor: 3
+

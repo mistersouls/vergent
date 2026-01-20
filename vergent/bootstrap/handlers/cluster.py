@@ -17,7 +17,7 @@ async def join(data: dict) -> Event:
 @app.request("ping")
 async def ping(data: dict) -> Event:
     core = get_core()
-    return Event(type="pong", payload={"from": core.peer_config.advertised_listener})
+    return Event(type="pong", payload={"from": core.peer_config.peer_listener})
 
 
 @app.request("gossip")
@@ -27,7 +27,7 @@ async def gossip(data: dict) -> Event:
     return Event(
             type="gossip",
             payload={
-                "address": core.peer_config.advertised_listener,
+                "address": core.peer_config.peer_listener,
                 "epoch": core.view.latest_epoch,
                 "peer_id": core.peer_config.node_id,
                 "checksums": core.view.get_checksums()
@@ -41,11 +41,12 @@ async def replicate(data: dict) -> Event:
     storage = core.storage
     key = data["key"]
     version = ValueVersion.from_dict(data["version"])
-    new_version = await storage.apply_remote_version(key, version)
+    partition = core.partitioner.find_partition_by_key(key)
+    new_version = await storage.apply(partition.pid_bytes, key, version)
     payload = {
         "version": new_version,
         "request_id": data.get("request_id"),
-        "source": core.peer_config.advertised_listener,
+        "source": core.peer_config.peer_listener,
     }
     return Event(type="ok", payload=payload)
 
@@ -61,7 +62,7 @@ async def sync(data: dict) -> Event:
             return Event(
                 type="sync/memberships",
                 payload={
-                    "address": core.peer_config.advertised_listener,
+                    "address": core.peer_config.peer_listener,
                     "peer_id": core.peer_config.node_id,
                     "memberships": core.view.get_bucket_memberships(bucket_id),
                     "bucket_id": bucket_id,
@@ -72,15 +73,21 @@ async def sync(data: dict) -> Event:
             versions = {}
 
             for key in keys:
-                v = await storage.get_version(key)
+                partition = core.partitioner.find_partition_by_key(key)
+                v = await storage.get_version(partition.pid_bytes, key)
                 if v is not None:
                     versions[key] = v.to_dict()
 
             return Event(type="sync/fetch", payload={
                 "versions": versions,
-                "source": core.peer_config.advertised_listener,
+                "source": core.peer_config.peer_listener,
                 "request_id": data.get("request_id"),
             })
+        case "partition":
+            partitions = data["partitions"]
+            replication_address = data["replication_address"]
+            core.pts.accept(replication_address, partitions)
+            return Event(type="ok", payload={"sender": core.peer_config.replication_listener})
         case _:
             return Event(type="error", payload={"message": f"Unknow kind sync {kind}"})
 
@@ -91,7 +98,8 @@ async def forward(data: dict) -> Event:
     kind = data["kind"]
     key = data["key"]
     request_id = data["request_id"]
-    owner = core.coordinator.find_key_owner(key)
+    placement = core.coordinator.find_key_placement(key)
+    owner = placement.vnode
     node_id = core.peer_state.membership.node_id
     if owner.node_id != node_id:
         return Event(
@@ -111,7 +119,7 @@ async def forward(data: dict) -> Event:
                 quorum_write=data["W"],
                 timeout=data["timeout"],
             )
-            return await core.coordinator.coordinate_put(request, owner)
+            return await core.coordinator.coordinate_put(request, placement)
         case "get":
             request = GetRequest(
                 request_id=request_id,
@@ -119,7 +127,7 @@ async def forward(data: dict) -> Event:
                 quorum_read=data["R"],
                 timeout=data["timeout"],
             )
-            return await core.coordinator.coordinate_get(request, owner)
+            return await core.coordinator.coordinate_get(request, placement)
         case "delete":
             request = DeleteRequest(
                 request_id=request_id,
@@ -127,7 +135,7 @@ async def forward(data: dict) -> Event:
                 quorum_write=data["W"],
                 timeout=data["timeout"],
             )
-            return await core.coordinator.coordinate_delete(request, owner)
+            return await core.coordinator.coordinate_delete(request, placement)
         case _:
             return Event(
                 type="error",

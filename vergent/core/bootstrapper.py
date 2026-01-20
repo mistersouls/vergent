@@ -22,7 +22,7 @@ class SeedBootstrapper:
     ) -> None:
         self._peer_state = state
         self._seeds = config.seeds
-        self._advertised_listener = config.advertised_listener
+        self._advertised_listener = config.peer_listener
         self._node_id = config.node_id
         self._node_size = config.node_size
         self._loop = loop

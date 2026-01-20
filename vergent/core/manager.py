@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from collections import defaultdict
 from typing import Callable, Awaitable
 
 from vergent.core.bootstrapper import SeedBootstrapper
@@ -64,7 +65,7 @@ class PeerManager:
     @property
     def should_join(self) -> bool:
         seeds = self._config.seeds
-        node = self._config.advertised_listener
+        node = self._config.peer_listener
         return seeds != set() and seeds != {node}
 
     async def start(self, stop_event: asyncio.Event) -> None:
@@ -123,11 +124,11 @@ class PeerManager:
             if membership is None:
                 continue
 
-            source = self._config.advertised_listener
+            source = self._config.peer_listener
             checksums = self._view.get_checksums()
             payload = {
                 "peer_id": source,
-                "address": self._state.membership.address,
+                "address": self._state.membership.peer_address,
                 "checksums": checksums
             }
 
@@ -210,16 +211,19 @@ class PeerManager:
         partitions = await asyncio.to_thread(
             self._compute_partitions_to_fetch, memberships
         )
+        await self._request_partitions(partitions)
 
         self._join_event.set()
-        self._logger.info(f"Own partitions: {partitions}")
+        self._logger.info(f"Node has joined to ring.")
 
-    def _compute_partitions_to_fetch(self, memberships: list[Membership]) -> dict[int, str]:
+    def _compute_partitions_to_fetch(self, memberships: list[Membership]) -> dict[str, list[int]]:
         vnodes: list[VNode] = []
 
         for membership in memberships:
             self._view.add_or_update(membership)
             vnodes.extend(VNode.generate_vnodes(membership.node_id, membership.tokens))
+            if not self._conns.has(membership.node_id):
+                self._conns.register(membership.node_id, membership.peer_address)
 
         old_ring = Ring(vnodes)
         local_vnodes = self._state.vnodes
@@ -230,26 +234,25 @@ class PeerManager:
         self._state.ring = old_ring.add_vnodes(local_vnodes)
         return stolen
 
-    def _compute_stolen_partitions(self, ring: Ring, vnodes: list[VNode]) -> dict[int, str]:
-        stolen = {}
+    def _compute_stolen_partitions(self, ring: Ring, vnodes: list[VNode]) -> dict[str, list[int]]:
+        """
+        ring = old ring (before adding our vnodes)
+        vnodes = our new vnodes
+        """
+        stolen = defaultdict(list)
 
-        for vnode in vnodes:
-            token = vnode.token
-            pid = self._partitioner.pid_for_hash(token)
-            prev_pid = pid - 1
+        # Build the new ring by adding our vnodes
+        new_ring = ring.add_vnodes(vnodes)
 
-            if prev_pid < 0:
-                continue
+        # For every partition, check if ownership changed
+        for pid in range(self._partitioner.total_partitions):
+            end = self._partitioner.end_for_pid(pid)
 
-            end = self._partitioner.end_for_pid(prev_pid)
-            old = ring.find_successor(end)
+            old_owner = ring.find_successor(end).node_id
+            new_owner = new_ring.find_successor(end).node_id
 
-            if old.token > end:
-                if end <= token < old.token:
-                    stolen[prev_pid] = old.node_id
-            else:
-                if token >= end or token < old.token:
-                    stolen[prev_pid] = old.node_id
+            if new_owner == self._state.membership.node_id and old_owner != new_owner:
+                stolen[old_owner].append(pid)
 
         return stolen
 
@@ -259,9 +262,28 @@ class PeerManager:
             return membership
         return None
 
+    async def _request_partitions(self, partitions: dict[str, list[int]]) -> None:
+        tasks: list[asyncio.Task] = []
+        for peer, partitions in partitions.items():
+            self._logger.debug(f"Requesting {len(partitions)} stolen partitions to {peer}")
+            event = Event(
+                type="sync",
+                payload={
+                    "kind": "partition",
+                    "partitions": partitions,
+                    "source": self._state.membership.node_id,
+                    "replication_address": self._state.membership.replication_address
+                }
+            )
+            client = self._conns.get(peer)
+            tasks.append(asyncio.create_task(client.send(event)))
+
+        if tasks:
+            await asyncio.wait(tasks)
+
     async def _send_event(self, membership: Membership, event: Event) -> None:
         peer = membership.node_id
-        address = membership.address
+        address = membership.peer_address
 
         if not self._conns.has(peer):
             self._conns.register(peer, address)

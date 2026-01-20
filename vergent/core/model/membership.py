@@ -9,7 +9,8 @@ MemberShipState = Literal["alive", "suspect", "dead"]
 @dataclass
 class Membership:
     node_id: str
-    address: str
+    peer_address: str
+    replication_address: str
     size: SizeClass
     tokens: list[int]
     epoch: int = 0
@@ -21,7 +22,8 @@ class Membership:
     def to_dict(self) -> dict:
         return {
             "node_id": self.node_id,
-            "address": self.address,
+            "peer_address": self.peer_address,
+            "replication_address": self.replication_address,
             "epoch": self.epoch,
             "size": self.size.name,
             "tokens": [f"{t:032x}" for t in self.tokens],
@@ -38,7 +40,8 @@ class Membership:
 
         return cls(
             node_id=data["node_id"],
-            address=data["address"],
+            peer_address=data["peer_address"],
+            replication_address=data["replication_address"],
             epoch=data.get("epoch", 0),
             size=size,
             tokens=tokens,

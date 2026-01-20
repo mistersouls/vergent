@@ -6,6 +6,7 @@ from vergent.bootstrap.deps import get_core
 from vergent.bootstrap.pkg import scan
 from vergent.core.facade import VergentCore
 from vergent.core.manager import PeerManager
+from vergent.core.replication import ReplicationServer
 from vergent.core.server import Server
 from vergent.core.utils.log import setup_logging
 from vergent.core.utils.sig import signal_handler
@@ -17,6 +18,7 @@ async def async_run(
 ) -> None:
     api_config = core.api_config
     peer_config = core.peer_config
+    replication_config = core.replication_config
     peer_state = core.peer_state
     loop = core.loop
 
@@ -33,6 +35,10 @@ async def async_run(
         # view=initial_view,
         # partitioner=core.partitioner,
     )
+    replication_server = ReplicationServer(
+        config=replication_config,
+        storage=core.storage,
+    )
 
     def graceful_exit(*_) -> None:
         stop_event.set()
@@ -41,7 +47,8 @@ async def async_run(
         peer_server = await peer.start()
         await peer_manager.start(stop_event)
         api_server = await api.start()
-        logger.info("[main] Node is now fully operational (P2P + API).")
+        await replication_server.start()
+        logger.info("[main] Node is now fully operational (P2P + API + Replication).")
 
         await stop_event.wait()
 
@@ -49,6 +56,7 @@ async def async_run(
         await peer.shutdown(peer_server)
         await peer_manager.shutdown()
         await core.connection_pools.close()
+        await replication_server.shutdown()
 
 
 def run(core: VergentCore) -> None:

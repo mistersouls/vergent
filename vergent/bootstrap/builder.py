@@ -6,7 +6,7 @@ from vergent.bootstrap.config.meta import VNodeMeta
 from vergent.bootstrap.config.settings import VergentConfig
 from vergent.core.app import App
 from vergent.core.bucket import BucketTable
-from vergent.core.config import ApiConfig, PeerConfig
+from vergent.core.config import ApiConfig, PeerConfig, ReplicationConfig
 from vergent.core.coordinator import Coordinator
 from vergent.core.facade import VergentCore
 from vergent.core.model.membership import Membership
@@ -14,6 +14,7 @@ from vergent.core.model.partition import Partitioner
 from vergent.core.model.state import PeerState
 from vergent.core.model.vnode import VNode
 from vergent.core.p2p.connection import PeerConnectionPool
+from vergent.core.replication import PartitionTransfer
 from vergent.core.ring import Ring
 from vergent.core.space import HashSpace
 from vergent.core.storage.partitionned import PartitionedStorage
@@ -44,6 +45,7 @@ class CoreBuilder:
         client_ssl_ctx = self.config.get_client_ssl_ctx()
         api_config = self._build_api_config(server_ssl_ctx)
         peer_config = self._build_peer_config(server_ssl_ctx, client_ssl_ctx)
+        replication_config = self._build_replication_config(server_ssl_ctx)
 
 
         peer_state = self._build_peer_state(peer_config)
@@ -69,15 +71,23 @@ class CoreBuilder:
             loop=loop
         )
 
+        pts = PartitionTransfer(
+            ssl_ctx=client_ssl_ctx,
+            storage=storage,
+            loop=loop
+        )
+
         return VergentCore(
             api_config=api_config,
             peer_config=peer_config,
+            replication_config=replication_config,
             peer_state=peer_state,
             incoming=subscription,
             view=BucketTable(128),
             partitioner=partitioner,
             storage=storage,
             coordinator=coordinator,
+            pts=pts,
             peer_clients=peer_clients,
             loop=loop
         )
@@ -142,16 +152,18 @@ class CoreBuilder:
     ) -> PeerConfig:
         server = self.config.server
         peer = server.peer
-        host = peer.host
-        port = peer.port
-        advertised_listener = peer.listener or f"{host}:{port}"
+        replication = server.replication
+        peer_host = peer.host
+        peer_port = peer.port
+        advertised_listener = peer.listener or f"{peer.host}:{peer.port}"
+        replication_listener = replication.listener or f"{replication.host}:{replication.port}"
 
         peer_config = PeerConfig(
             app=self.peer,
             node_id=self.config.node.id,
             node_size=self.config.node.size,
-            host=host,
-            port=port,
+            host=peer_host,
+            port=peer_port,
             backlog=server.backlog,
             ssl_ctx=server_ssl_ctx,
             client_ssl_ctx=client_ssl_ctx,
@@ -159,12 +171,27 @@ class CoreBuilder:
             limit_concurrency=server.limit_concurrency,
             max_buffer_size=server.max_buffer_size,
             max_message_size=server.max_message_size,
-            advertised_listener=advertised_listener,
+            peer_listener=advertised_listener,
+            replication_listener=replication_listener,
             seeds=set(peer.seeds),
             partition_shift=self.config.placement.shift,
             replication_factor=self.config.placement.replication_factor
         )
         return peer_config
+
+    def _build_replication_config(self, server_ssl_ctx: ssl.SSLContext) -> ReplicationConfig:
+        server = self.config.server
+        replication = server.replication
+        return ReplicationConfig(
+            host=replication.host,
+            port=replication.port,
+            backlog=server.backlog,
+            ssl_ctx=server_ssl_ctx,
+            timeout_graceful_shutdown=server.timeout_graceful_shutdown,
+            limit_concurrency=server.limit_concurrency,
+            max_buffer_size=server.max_buffer_size,
+            max_message_size=server.max_message_size,
+        )
 
     def _build_peer_state(self, config: PeerConfig) -> PeerState:
         meta = self._load_or_generate_meta()
@@ -172,7 +199,8 @@ class CoreBuilder:
         ring = Ring(vnodes)
         membership = Membership(
             node_id=meta.node_id,
-            address=config.advertised_listener,
+            peer_address=config.peer_listener,
+            replication_address=config.replication_listener,
             size=meta.size,
             tokens=meta.tokens
         )

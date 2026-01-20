@@ -3,7 +3,7 @@ import logging
 
 from vergent.core.exception import InternalError
 from vergent.core.model.event import Event
-from vergent.core.model.partition import Partitioner
+from vergent.core.model.partition import Partitioner, PartitionPlacement
 from vergent.core.model.request import PutRequest, GetRequest, DeleteRequest
 from vergent.core.model.state import PeerState
 from vergent.core.model.vnode import VNode
@@ -68,28 +68,31 @@ class Coordinator:
         return self._state.membership.node_id
 
     async def put(self, request: PutRequest) -> Event:
-        primary = self.find_key_owner(request.key)
+        placement = self.find_key_placement(request.key)
+        primary = placement.vnode
 
         if self.local_node_id != primary.node_id:
-            return await self.forward_put(request, primary)
+            return await self.forward_put(request, placement)
 
-        return await self.coordinate_put(request, primary)
+        return await self.coordinate_put(request, placement)
 
     async def get(self, request: GetRequest) -> Event:
-        primary = self.find_key_owner(request.key)
+        placement = self.find_key_placement(request.key)
+        primary = placement.vnode
 
         if self.local_node_id != primary.node_id:
-            return await self.forward_get(request, primary)
+            return await self.forward_get(request, placement)
 
-        return await self.coordinate_get(request, primary)
+        return await self.coordinate_get(request, placement)
 
     async def delete(self, request: DeleteRequest) -> Event:
-        primary = self.find_key_owner(request.key)
+        placement = self.find_key_placement(request.key)
+        primary = placement.vnode
 
         if self.local_node_id != primary.node_id:
-            return await self.forward_delete(request, primary)
+            return await self.forward_delete(request, placement)
 
-        return await self.coordinate_delete(request, primary)
+        return await self.coordinate_delete(request, placement)
 
     def on_event(self, event: Event) -> None:
         request_id = event.payload.get("request_id")
@@ -112,17 +115,30 @@ class Coordinator:
 
         handler(event, pending)
 
-    async def coordinate_put(self, request: PutRequest, primary: VNode) -> Event:
-        return await self._coordinate_write(request, primary)
+    async def coordinate_put(
+        self,
+        request: PutRequest,
+        placement: PartitionPlacement
+    ) -> Event:
+        return await self._coordinate_write(request, placement)
 
-    async def coordinate_delete(self, request: DeleteRequest, primary: VNode) -> Event:
-        return await self._coordinate_write(request, primary)
+    async def coordinate_delete(
+        self,
+        request: DeleteRequest,
+        placement: PartitionPlacement
+    ) -> Event:
+        return await self._coordinate_write(request, placement)
 
-    async def coordinate_get(self, request: GetRequest, primary: VNode) -> Event:
+    async def coordinate_get(
+        self,
+        request: GetRequest,
+        placement: PartitionPlacement
+    ) -> Event:
         """
         Coordinate a GET for which this node is the primary.
         """
         ring = self._state.ring
+        primary = placement.vnode
         replicas = ring.preference_list(primary, self._replication_factor)
 
         request_id = request.request_id
@@ -133,7 +149,7 @@ class Coordinator:
 
         try:
             # 1. Local read (None means "no value" locally).
-            local_version = await self._storage.get_version(request.key)
+            local_version = await self._storage.get_version(placement.keyspace, request.key)
             pending.ack_success(local_version)
 
             # 2. Ask replicas via sync/fetch.
@@ -191,19 +207,32 @@ class Coordinator:
                 payload={"message": str(ex), "request_id": request_id},
             )
 
-    async def forward_put(self, request: PutRequest, primary: VNode) -> Event:
-        return await self._forward_write(request, primary)
+    async def forward_put(
+        self,
+        request: PutRequest,
+        placement: PartitionPlacement
+    ) -> Event:
+        return await self._forward_write(request, placement.vnode)
 
-    async def forward_delete(self, request: DeleteRequest, primary: VNode) -> Event:
-        return await self._forward_write(request, primary)
+    async def forward_delete(
+        self,
+        request: DeleteRequest,
+        placement: PartitionPlacement
+    ) -> Event:
+        return await self._forward_write(request, placement.vnode)
 
-    async def forward_get(self, request: GetRequest, primary: VNode) -> Event:
+    async def forward_get(
+        self,
+        request: GetRequest,
+        placement: PartitionPlacement
+    ) -> Event:
         """
         Forward the GET to the primary coordinator and wait for its result.
 
         From this node's perspective, quorum is 1: the primary's response,
         which itself is based on its own read quorum.
         """
+        primary = placement.vnode
         request_id = request.request_id
 
         payload = {
@@ -263,6 +292,11 @@ class Coordinator:
         ring = self._state.ring
         placement = self._partitioner.find_placement_by_key(key, ring)
         return placement.vnode
+
+    def find_key_placement(self, key: bytes) -> PartitionPlacement:
+        ring = self._state.ring
+        placement = self._partitioner.find_placement_by_key(key, ring)
+        return placement
 
     async def close(self) -> None:
         # 1. Stop event loop
@@ -359,12 +393,13 @@ class Coordinator:
     async def _coordinate_write(
         self,
         request: PutRequest | DeleteRequest,
-        primary: VNode,
+        placement: PartitionPlacement,
     ) -> Event:
         """
         Generic coordinator for write operations (PUT and DELETE).
         """
         ring = self._state.ring
+        primary = placement.vnode
         replicas = ring.preference_list(primary, self._replication_factor)
 
         request_id = request.request_id
@@ -376,9 +411,9 @@ class Coordinator:
         try:
             # 1. Perform local write (PUT or DELETE).
             if isinstance(request, PutRequest):
-                local_version = await self._put_local(pending, request)
+                local_version = await self._put_local(pending, request, placement)
             else:
-                local_version = await self._delete_local(pending, request)
+                local_version = await self._delete_local(pending, request, placement)
 
             # 2. Replicate to other replicas.
             replicate_event = Event(
@@ -498,15 +533,21 @@ class Coordinator:
                 break
             self.on_event(event)
 
-    async def _put_local(self, pending: Pending, request: PutRequest) -> ValueVersion:
+    async def _put_local(
+        self,
+        pending: Pending,
+        request: PutRequest,
+        placement: PartitionPlacement
+    ) -> ValueVersion:
         """
         Perform the local PUT and count it toward the quorum.
         """
         key = request.key
         value = request.value
+        keyspace = placement.keyspace
 
         try:
-            version = await self._storage.put_local(key, value)
+            version = await self._storage.put_local(keyspace, key, value)
             pending.ack_success(version)
             return version
         except Exception as ex:
@@ -516,14 +557,20 @@ class Coordinator:
             pending.ack_failure()
             raise InternalError(f"Internal error while putting locally '{key}'") from ex
 
-    async def _delete_local(self, pending: Pending, request: DeleteRequest) -> ValueVersion:
+    async def _delete_local(
+        self,
+        pending: Pending,
+        request: DeleteRequest,
+        placement: PartitionPlacement
+    ) -> ValueVersion:
         """
         Perform the local DELETE and count it toward the quorum.
         """
         key = request.key
+        keyspace = placement.keyspace
 
         try:
-            version = await self._storage.delete_local(key)
+            version = await self._storage.delete_local(keyspace, key)
             pending.ack_success(version)
             return version
         except Exception as ex:

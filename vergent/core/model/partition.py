@@ -73,6 +73,10 @@ class LogicalPartition:
     end: int
 
     @property
+    def pid_bytes(self) -> bytes:
+        return format(self.pid, "x").encode("ascii")
+
+    @property
     def strong_id(self) -> str:
         return f"{self.pid}-{self.start:0x32}:{self.end:0x32}"
 
@@ -85,3 +89,7 @@ class LogicalPartition:
 class PartitionPlacement:
     partition: LogicalPartition
     vnode: VNode
+
+    @property
+    def keyspace(self) -> bytes:
+        return self.partition.pid_bytes

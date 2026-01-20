@@ -112,6 +112,66 @@ class PeerServerSettings(BaseModel):
     ]
 
 
+class ReplicationServerSettings(BaseModel):
+    host: Annotated[
+        str,
+        Field(
+            description=(
+                "Bind address for the replication server.\n"
+                "Usually 0.0.0.0 so peers can reach it.\n"
+                "This server handles binary partition transfers (FileReceiver)."
+            ),
+            default="127.0.0.1",
+        ),
+    ]
+
+    port: Annotated[
+        int,
+        Field(
+            description=(
+                "TCP port dedicated to partition replication.\n"
+                "Used exclusively for binary partition transfers and separate from "
+                "the peer API (server.peer.port)."
+            ),
+            default=13000,
+        ),
+    ]
+
+    listener: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Public address advertised to other nodes for partition transfers.\n"
+                "If omitted, defaults to '<host>:<port>'."
+            ),
+            default=None,
+        ),
+    ]
+
+    max_concurrent_transfers: Annotated[
+        int,
+        Field(
+            description=(
+                "Maximum number of concurrent incoming partition transfers.\n"
+                "Each transfer uses one TCP connection and one SHA‑256 streaming pipeline."
+            ),
+            default=4,
+        ),
+    ]
+
+    timeout_transfer: Annotated[
+        float,
+        Field(
+            description=(
+                "Maximum allowed duration for a single file transfer.\n"
+                "If exceeded, the transfer is aborted and the connection closed.\n"
+                "0 means no timeout."
+            ),
+            default=30.0,
+        ),
+    ]
+
+
 class TLSSettings(BaseModel):
     certfile: Annotated[
         Path,
@@ -162,6 +222,11 @@ class ServerSettings(BaseModel):
     peer: Annotated[
         PeerServerSettings,
         Field(description="Inter-node server configuration.")
+    ]
+
+    replication: Annotated[
+        ReplicationServerSettings,
+        Field(description="Replication server configuration.")
     ]
 
     tls: Annotated[
