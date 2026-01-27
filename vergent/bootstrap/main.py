@@ -30,6 +30,7 @@ async def async_run(
         state=peer_state,
         conns=core.connection_pools,
         partitioner=core.partitioner,
+        meta_store=core.meta_store,
         view=core.view,
         loop=loop,
         # view=initial_view,
@@ -38,6 +39,7 @@ async def async_run(
     replication_server = ReplicationServer(
         config=replication_config,
         storage=core.storage,
+        subscription=core.connection_pools.subscription
     )
 
     def graceful_exit(*_) -> None:
@@ -45,9 +47,9 @@ async def async_run(
 
     with signal_handler(graceful_exit):
         peer_server = await peer.start()
+        await replication_server.start()
         await peer_manager.start(stop_event)
         api_server = await api.start()
-        await replication_server.start()
         logger.info("[main] Node is now fully operational (P2P + API + Replication).")
 
         await stop_event.wait()

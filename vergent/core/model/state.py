@@ -2,8 +2,8 @@ import asyncio
 from typing import TYPE_CHECKING, Literal
 from dataclasses import dataclass, field
 
-from vergent.core.model.membership import Membership
-from vergent.core.model.vnode import VNode
+from vergent.core.model.vnode import SizeClass
+from vergent.core.p2p.hlc import HLC
 from vergent.core.ring import Ring
 
 
@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from vergent.core.protocol import Protocol
 
 
-PeerPhase = Literal["idle", "joining", "leaving", "normal"]
+NodePhase = Literal["idle", "joining", "draining", "ready"]
 
 
 @dataclass
@@ -23,8 +23,14 @@ class ServerState:
 
 @dataclass
 class PeerState:
-    membership: Membership
-    vnodes: list[VNode]
     ring: Ring = field(default_factory=Ring)
-    phase: PeerPhase = "idle"
     tasks: set[asyncio.Task[None]] = field(default_factory=set)
+
+
+@dataclass
+class NodeMeta:
+    node_id: str
+    size: SizeClass
+    hlc: HLC
+    phase: NodePhase = "idle"
+    tokens: list[int] = field(default_factory=list)

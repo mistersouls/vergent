@@ -2,8 +2,6 @@ import hashlib
 import secrets
 from typing import Generator
 
-from vergent.core.model.token_ import Token
-
 
 class HashSpace:
     """

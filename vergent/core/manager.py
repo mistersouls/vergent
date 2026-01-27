@@ -1,19 +1,19 @@
 import asyncio
 import logging
-from collections import defaultdict
 from typing import Callable, Awaitable
 
-from vergent.core.bootstrapper import SeedBootstrapper
 from vergent.core.bucket import BucketTable
 from vergent.core.config import PeerConfig
 from vergent.core.gossip import GossipBucketSync
+from vergent.core.lifecycle import PeerLifecycle
 from vergent.core.model.event import Event
 from vergent.core.model.membership import Membership, MembershipDiff
 from vergent.core.model.partition import Partitioner
 from vergent.core.model.state import PeerState
 from vergent.core.model.vnode import VNode
 from vergent.core.p2p.connection import PeerConnectionPool
-from vergent.core.ring import Ring
+from vergent.core.ports.node import NodeMetaStore
+from vergent.core.space import HashSpace
 from vergent.core.sub import Subscription
 
 
@@ -22,6 +22,7 @@ class PeerManager:
         self,
         config: PeerConfig,
         state: PeerState,
+        meta_store: NodeMetaStore,
         conns: PeerConnectionPool,
         partitioner: Partitioner,
         view: BucketTable,
@@ -30,16 +31,22 @@ class PeerManager:
         self._logger = logging.getLogger("vergent.core.manager")
         self._config = config
         self._state = state
+        self._meta_store = meta_store
         self._conns = conns
         self._partitioner = partitioner
         self._loop = loop
         self._view = view
 
-        self._started = False
-        self._joined = False
+        node_meta = self._meta_store.get()
+        self._membership = Membership(
+            node_id=node_meta.node_id,
+            size=node_meta.size,
+            peer_address=self._config.peer_listener,
+            replication_address=self._config.replication_listener,
+            tokens=[]
+        )
         self._join_event = asyncio.Event()
-        self._leave_event = asyncio.Event()
-        self._owned_partitions: set[int] = set()
+        self._drain_event = asyncio.Event()
         self._internal_incoming: Subscription[Event | None] = Subscription(self._loop)
         self._bucket_syncer = GossipBucketSync(
             bucket_table=self._view,
@@ -50,6 +57,7 @@ class PeerManager:
         # Event dispatcher
         self._handlers: dict[str, Callable[[Event], Awaitable[None]]] = {
             "join": self._handle_join,
+            "drain": self._handle_drain,
             "gossip": self._handle_gossip,
             "_sync/memberships": self._handle_internal_membership,
             "sync/memberships": self._handle_membership
@@ -63,10 +71,10 @@ class PeerManager:
         return task
 
     @property
-    def should_join(self) -> bool:
+    def standalone(self) -> bool:
         seeds = self._config.seeds
         node = self._config.peer_listener
-        return seeds != set() and seeds != {node}
+        return seeds == set() or seeds == {node}
 
     async def start(self, stop_event: asyncio.Event) -> None:
         """Unified startup pipeline."""
@@ -82,24 +90,38 @@ class PeerManager:
         self._logger.info("Gossip bucket syncer started")
 
         # Wait for join event
-        if self.should_join:
-            self._logger.info("Waiting for JOIN event before starting gossip")
-            join_wait_task = asyncio.create_task(self._join_event.wait())
+        if not self.standalone:
+            lifecycle = PeerLifecycle(
+                meta_store=self._meta_store,
+                config=self._config,
+                state=self._state,
+                view=self._view,
+                conns=self._conns,
+                partitioner=self._partitioner,
+                loop=self._loop
+            )
+            join_task = asyncio.create_task(lifecycle.join(self._join_event))
+            drain_task =asyncio.create_task(lifecycle.drain(self._drain_event))
             stop_task = asyncio.create_task(stop_event.wait())
             await asyncio.wait(
-                [join_wait_task, stop_task],
+                [join_task, drain_task, stop_task],
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if stop_event.is_set():
-                self._logger.info("Stop event received, cancel waiting for JOIN")
-                join_wait_task.cancel()
+                self._logger.info("Stop event received, cancel waiting for JOIN/DRAIN")
+                join_task.cancel()
+                drain_task.cancel()
                 return
 
+            self._membership = self._membership_from_tasks([join_task, drain_task])
             stop_task.cancel()
+            self._logger.info("Starting in ring mode.")
+        else:
+            self._logger.info("Starting in single-node mode")
+            self._membership = self._standalone_membership()
 
         # Add ourselves to the view
-        self._logger.info("Starting in single-node mode")
-        self._view.add_or_update(self._state.membership)
+        self._view.add_or_update(self._membership)
 
         # Start gossip after join or immediately in single-node mode
         self._spawn(self._gossip_forever(stop_event))
@@ -128,7 +150,7 @@ class PeerManager:
             checksums = self._view.get_checksums()
             payload = {
                 "peer_id": source,
-                "address": self._state.membership.peer_address,
+                "address": self._membership.peer_address,
                 "checksums": checksums
             }
 
@@ -153,7 +175,7 @@ class PeerManager:
             payload={
                 "kind": "membership",
                 "bucket_id": event.payload["bucket_id"],
-                "source": self._state.membership.node_id
+                "source": self._membership.node_id
             }
         )
         client = self._conns.get(target)
@@ -192,94 +214,62 @@ class PeerManager:
     async def _handle_join(self, _: Event) -> None:
         """Triggered when a JOIN event is received."""
         if self._join_event.is_set():
-            self._logger.warning("Node already joined peers")
+            self._logger.warning("Join gate already enabled.")
             return
 
-        bootstrapper = SeedBootstrapper(
-            config=self._config,
-            state=self._state,
-            loop=self._loop,
-            checksums=self._view.get_checksums(),
-        )
-
-        memberships = await bootstrapper.bootstrap()
-        while not memberships:
-            self._logger.error("No memberships fetched from seeds, retrying in 5 sec...")
-            await asyncio.sleep(5)
-            memberships = await bootstrapper.bootstrap()
-
-        partitions = await asyncio.to_thread(
-            self._compute_partitions_to_fetch, memberships
-        )
-        await self._request_partitions(partitions)
+        meta = self._meta_store.get()
+        if meta.phase == "draining":
+            self._logger.info("Waiting draining phase to finish.")
+            await self._drain_event.wait()
 
         self._join_event.set()
-        self._logger.info(f"Node has joined to ring.")
+        self._drain_event.clear()
+        self._logger.info(f"Join gate enabled.")
 
-    def _compute_partitions_to_fetch(self, memberships: list[Membership]) -> dict[str, list[int]]:
-        vnodes: list[VNode] = []
+    async def _handle_drain(self, _: Event) -> None:
+        """Triggered when a DRAIN event is received."""
+        if self._drain_event.is_set():
+            self._logger.warning("Drain gate already enabled.")
+            return
 
-        for membership in memberships:
-            self._view.add_or_update(membership)
-            vnodes.extend(VNode.generate_vnodes(membership.node_id, membership.tokens))
-            if not self._conns.has(membership.node_id):
-                self._conns.register(membership.node_id, membership.peer_address)
+        meta = self._meta_store.get()
+        if meta.phase == "joining":
+            self._logger.info("Waiting joining phase to finish.")
+            await self._join_event.wait()
 
-        old_ring = Ring(vnodes)
-        local_vnodes = self._state.vnodes
+        self._drain_event.set()
+        self._join_event.clear()
+        self._logger.info(f"Drain gate enabled.")
 
-        stolen = self._compute_stolen_partitions(old_ring, local_vnodes)
-        self._owned_partitions = set(stolen.keys())
+    def _membership_from_tasks(self, tasks: list[asyncio.Task]) -> Membership:
+        membership = None
 
-        self._state.ring = old_ring.add_vnodes(local_vnodes)
-        return stolen
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+                continue
 
-    def _compute_stolen_partitions(self, ring: Ring, vnodes: list[VNode]) -> dict[str, list[int]]:
-        """
-        ring = old ring (before adding our vnodes)
-        vnodes = our new vnodes
-        """
-        stolen = defaultdict(list)
+            if ex := task.exception():
+                self._logger.warning(ex)
+                continue
 
-        # Build the new ring by adding our vnodes
-        new_ring = ring.add_vnodes(vnodes)
+            if membership is None:
+                membership = task.result()
+            else:
+                raise RuntimeError(
+                    "Race condition for membership from different tasks."
+                )
 
-        # For every partition, check if ownership changed
-        for pid in range(self._partitioner.total_partitions):
-            end = self._partitioner.end_for_pid(pid)
+        if membership is None:
+            raise RuntimeError("Could not determine local membership")
 
-            old_owner = ring.find_successor(end).node_id
-            new_owner = new_ring.find_successor(end).node_id
-
-            if new_owner == self._state.membership.node_id and old_owner != new_owner:
-                stolen[old_owner].append(pid)
-
-        return stolen
+        return membership
 
     def _peek_random_member(self) -> Membership | None:
         membership = self._view.peek_random_member()
-        if membership.node_id != self._state.membership.node_id:
+        if membership.node_id != self._membership.node_id:
             return membership
         return None
-
-    async def _request_partitions(self, partitions: dict[str, list[int]]) -> None:
-        tasks: list[asyncio.Task] = []
-        for peer, partitions in partitions.items():
-            self._logger.debug(f"Requesting {len(partitions)} stolen partitions to {peer}")
-            event = Event(
-                type="sync",
-                payload={
-                    "kind": "partition",
-                    "partitions": partitions,
-                    "source": self._state.membership.node_id,
-                    "replication_address": self._state.membership.replication_address
-                }
-            )
-            client = self._conns.get(peer)
-            tasks.append(asyncio.create_task(client.send(event)))
-
-        if tasks:
-            await asyncio.wait(tasks)
 
     async def _send_event(self, membership: Membership, event: Event) -> None:
         peer = membership.node_id
@@ -290,6 +280,35 @@ class PeerManager:
 
         client = self._conns.get(peer)
         await client.send(event)
+
+    def _standalone_membership(self) -> Membership:
+        # to review: self._meta_store.get() is calling multiple
+        # time there and in PeerLifecycle
+        meta = self._meta_store.get()
+
+        node_id = meta.node_id
+        node_size = meta.size
+        tokens = meta.tokens
+
+        saved = False
+        if not tokens:
+            gen_tokens = HashSpace.generate_tokens(node_id, node_size.value)
+            tokens = list(gen_tokens)
+            saved = True
+        if meta.phase != "ready":
+            saved = True
+
+        if saved:
+            self._meta_store.save(meta)
+
+
+        return Membership(
+            node_id=node_id,
+            size=node_size,
+            tokens=tokens,
+            peer_address=self._config.peer_listener,
+            replication_address=self._config.replication_listener
+        )
 
     def _update_ring(self, diff: MembershipDiff) -> None:
         ring = self._state.ring

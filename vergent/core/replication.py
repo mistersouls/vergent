@@ -4,8 +4,9 @@ import ssl
 import struct
 
 from vergent.core.config import ReplicationConfig
+from vergent.core.model.event import Event
 from vergent.core.storage.versionned import VersionedStorage
-
+from vergent.core.sub import Subscription
 
 # partition_id length
 HEADER_PID = struct.Struct("!I")
@@ -31,10 +32,12 @@ class ReplicationServer:
         self,
         config: ReplicationConfig,
         storage: VersionedStorage,
+        subscription: Subscription,
         batch_size: int = 1024,
     ) -> None:
         self._config = config
         self._storage = storage
+        self._subscription = subscription
         self._batch_size = batch_size
 
         self._server: asyncio.AbstractServer | None = None
@@ -71,7 +74,7 @@ class ReplicationServer:
         (pid_len,) = HEADER_PID.unpack(pid_len_bytes)
 
         pid_bytes = await reader.readexactly(pid_len)
-        pid = int.from_bytes(pid_bytes, "big")
+        pid = int(pid_bytes.decode("ascii"), 16)
         self._logger.info(f"Receiving partition {pid}")
 
         batch: list[tuple[bytes, bytes]] = []
@@ -95,10 +98,10 @@ class ReplicationServer:
         if batch:
             await self._storage.apply_many(pid_bytes, batch)
 
-        self._logger.info(f"Partition {pid} fully received")
-
         writer.write(b"OK")
         await writer.drain()
+        self._subscription.publish(Event(type="_sync/partition", payload={"pid": pid}))
+        self._logger.info(f"Partition {pid} fully received")
 
     async def _handle_connection(
         self,

@@ -33,7 +33,7 @@ class PeerConnection:
         self._logger = logging.getLogger("vergent.core.peering")
 
     async def connect(self) -> None:
-        while not self.connected:
+        while not self.connected:   # todo(souls): inject stop_event
             try:
                 host, port = self._address.split(":")
                 self._reader, self._writer = await asyncio.open_connection(
@@ -65,6 +65,7 @@ class PeerConnection:
         try:
             await self._writer.drain()
         except ConnectionResetError as ex:
+            self.connected = False
             self._logger.error(f"Connection reset by {self._address}: {ex}")
 
     async def recv(self) -> None:
