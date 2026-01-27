@@ -5,7 +5,6 @@ from collections import deque
 from vergent.core.config import PeerConfig
 from vergent.core.model.event import Event
 from vergent.core.model.membership import Membership
-from vergent.core.model.state import PeerState
 from vergent.core.p2p.connection import PeerConnection
 from vergent.core.p2p.view import View
 from vergent.core.sub import Subscription
@@ -15,12 +14,10 @@ class SeedBootstrapper:
     def __init__(
         self,
         config: PeerConfig,
-        state: PeerState,
         checksums: dict[str, int],
         loop: asyncio.AbstractEventLoop,
         max_epoch_delta: int = 3    # todo(souls): put in config
     ) -> None:
-        self._peer_state = state
         self._seeds = config.seeds
         self._advertised_listener = config.peer_listener
         self._node_id = config.node_id

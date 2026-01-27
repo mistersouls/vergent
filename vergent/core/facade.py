@@ -7,6 +7,7 @@ from vergent.core.model.event import Event
 from vergent.core.model.partition import Partitioner
 from vergent.core.model.state import PeerState
 from vergent.core.p2p.connection import PeerConnectionPool
+from vergent.core.ports.node import NodeMetaStore
 from vergent.core.replication import PartitionTransfer
 from vergent.core.storage.versionned import VersionedStorage
 from vergent.core.sub import Subscription
@@ -19,6 +20,7 @@ class VergentCore:
         peer_config: PeerConfig,
         replication_config: ReplicationConfig,
         peer_state: PeerState,
+        meta_store: NodeMetaStore,
         incoming: Subscription[Event | None],
         view: BucketTable,
         partitioner: Partitioner,
@@ -32,6 +34,7 @@ class VergentCore:
         self.peer_config = peer_config
         self.replication_config = replication_config
         self.peer_state = peer_state
+        self.meta_store = meta_store
         self.incoming = incoming
         self.view = view
         self.partitioner = partitioner

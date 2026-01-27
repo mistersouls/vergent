@@ -1,8 +1,5 @@
 import asyncio
 import ssl
-from pathlib import Path
-
-from vergent.bootstrap.config.meta import VNodeMeta
 from vergent.bootstrap.config.settings import VergentConfig
 from vergent.core.app import App
 from vergent.core.bucket import BucketTable
@@ -11,9 +8,11 @@ from vergent.core.coordinator import Coordinator
 from vergent.core.facade import VergentCore
 from vergent.core.model.membership import Membership
 from vergent.core.model.partition import Partitioner
-from vergent.core.model.state import PeerState
+from vergent.core.model.state import PeerState, NodeMeta
 from vergent.core.model.vnode import VNode
 from vergent.core.p2p.connection import PeerConnectionPool
+from vergent.core.p2p.hlc import HLC
+from vergent.core.ports.node import NodeMetaStore
 from vergent.core.replication import PartitionTransfer
 from vergent.core.ring import Ring
 from vergent.core.space import HashSpace
@@ -21,6 +20,7 @@ from vergent.core.storage.partitionned import PartitionedStorage
 from vergent.core.storage.versionned import VersionedStorage
 from vergent.core.sub import Subscription
 from vergent.infra.local_storage import LMDBStorageFactory
+from vergent.infra.nodemeta_store import SafeNodeMetaStore
 
 
 class CoreBuilder:
@@ -41,6 +41,10 @@ class CoreBuilder:
         self.peer = peer
 
     def build(self) -> VergentCore:
+        meta_store = self._build_meta_store()
+        node_meta = meta_store.get()
+        self._validate_meta(node_meta)
+
         server_ssl_ctx = self.config.get_server_ssl_ctx()
         client_ssl_ctx = self.config.get_client_ssl_ctx()
         api_config = self._build_api_config(server_ssl_ctx)
@@ -48,7 +52,7 @@ class CoreBuilder:
         replication_config = self._build_replication_config(server_ssl_ctx)
 
 
-        peer_state = self._build_peer_state(peer_config)
+        peer_state = self._build_peer_state(node_meta, peer_config)
 
         partitioner = Partitioner(self.config.placement.shift)
         storage = self._build_storage(partitioner)
@@ -82,6 +86,7 @@ class CoreBuilder:
             peer_config=peer_config,
             replication_config=replication_config,
             peer_state=peer_state,
+            meta_store=meta_store,
             incoming=subscription,
             view=BucketTable(128),
             partitioner=partitioner,
@@ -92,41 +97,23 @@ class CoreBuilder:
             loop=loop
         )
 
-    def _meta_path(self) -> Path:
-        return self.config.storage.data_dir / "meta" / "vnodes.meta"
-
-    def _load_or_generate_meta(self) -> VNodeMeta:
-        path = self._meta_path()
+    def _build_meta_store(self) -> NodeMetaStore:
+        path = self.config.storage.data_dir / "meta" / "node.meta"
+        store = SafeNodeMetaStore(path)
 
         if path.exists():
-            meta = VNodeMeta.load(path)
-            self._validate_meta(meta)
-            return meta
+            return store
 
         node_id = self.config.node.id
         size = self.config.node.size
-        tokens = [
-            HashSpace.random_token(node_id)
-            for _ in range(size.value)
-        ]
-        meta = VNodeMeta(
-            version=1,
+        meta = NodeMeta(
             node_id=node_id,
             size=size,
-            tokens=tokens,
+            tokens=[],
+            hlc=HLC.initial(node_id)
         )
-
-        meta.save(path)
-        return meta
-
-    def _validate_meta(self, meta: VNodeMeta) -> None:
-        if meta.node_id != self.config.node.id:
-            raise RuntimeError(
-                f"VNodeMeta integrity error: data_dir belongs to node '{meta.node_id}', "
-                f"but configuration declares node '{self.config.node.id}'. "
-                f"Starting with mismatched vnode ownership would corrupt the ring. "
-                f"Fix by restoring the correct data_dir or wiping it before restart."
-            )
+        store.save(meta)
+        return store
 
     def _build_api_config(self, ssl_ctx: ssl.SSLContext) -> ApiConfig:
         server = self.config.server
@@ -193,21 +180,10 @@ class CoreBuilder:
             max_message_size=server.max_message_size,
         )
 
-    def _build_peer_state(self, config: PeerConfig) -> PeerState:
-        meta = self._load_or_generate_meta()
-        vnodes = VNode.generate_vnodes(meta.node_id, meta.tokens)
-        ring = Ring(vnodes)
-        membership = Membership(
-            node_id=meta.node_id,
-            peer_address=config.peer_listener,
-            replication_address=config.replication_listener,
-            size=meta.size,
-            tokens=meta.tokens
-        )
+    @staticmethod
+    def _build_peer_state(meta: NodeMeta, config: PeerConfig) -> PeerState:
         state = PeerState(
-            membership=membership,
-            vnodes=vnodes,
-            ring=ring,
+            ring=Ring(),
         )
         return state
 
@@ -227,3 +203,12 @@ class CoreBuilder:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         return loop
+
+    def _validate_meta(self, meta: NodeMeta) -> None:
+        if meta.node_id != self.config.node.id:
+            raise RuntimeError(
+                f"VNodeMeta integrity error: data_dir belongs to node '{meta.node_id}', "
+                f"but configuration declares node '{self.config.node.id}'. "
+                f"Starting with mismatched vnode ownership would corrupt the ring. "
+                f"Fix by restoring the correct data_dir or wiping it before restart."
+            )

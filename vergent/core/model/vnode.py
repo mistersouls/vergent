@@ -1,7 +1,6 @@
+from collections.abc import Iterable
 from enum import Enum
 from typing import Self
-
-from vergent.core.model.token_ import Token
 from vergent.core.space import HashSpace
 
 
@@ -44,7 +43,7 @@ class VNode(tuple):
         return cls(token, node_id)
 
     @classmethod
-    def generate_vnodes(cls, node_id: str, tokens: list[int]) -> list[VNode]:
+    def generate_vnodes(cls, node_id: str, tokens: Iterable[int]) -> list[VNode]:
         return [cls(token, node_id) for token in tokens]
 
     def repr_token(self) -> str:
