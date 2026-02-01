@@ -1,6 +1,7 @@
 import asyncio
 import logging
 
+from vergent.core.config import PeerConfig
 from vergent.core.exception import InternalError
 from vergent.core.model.event import Event
 from vergent.core.model.partition import Partitioner, PartitionPlacement
@@ -42,6 +43,7 @@ class Coordinator:
     def __init__(
         self,
         state: PeerState,
+        config: PeerConfig,
         peers: PeerConnectionPool,
         partitioner: Partitioner,
         subscription: Subscription[Event | None],
@@ -50,6 +52,7 @@ class Coordinator:
         loop: asyncio.AbstractEventLoop,
     ) -> None:
         self._state = state
+        self._config = config
         self._peers = peers
         self._partitioner = partitioner
         self._subscription = subscription
@@ -65,7 +68,7 @@ class Coordinator:
 
     @property
     def local_node_id(self) -> str:
-        return self._state.membership.node_id
+        return self._config.node_id
 
     async def put(self, request: PutRequest) -> Event:
         placement = self.find_key_placement(request.key)

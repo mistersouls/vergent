@@ -35,16 +35,19 @@ class PeerLifecycle:
         self._partitioner = partitioner
         self._loop = loop
 
+        self._recovering_done = asyncio.Event()
+        self._recovering_done.set()
         self._logger = logging.getLogger("vergent.core.lifecycle")
 
     async def join(self, gate: asyncio.Event) -> Membership:
         meta = self._meta_store.get()
 
         if meta.phase == "ready":
-            self._logger.info("Node is already in ready phase.")
+            self._logger.info("Recovering ring after restart.")
+            self._recovering_done.clear()
             membership = self._membership_for_join(meta)
-            # todo(souls): race condition if join and drain in short window
             await self._build_ring(membership)
+            self._recovering_done.set()
             return membership
 
         if meta.phase == "idle":
@@ -71,8 +74,10 @@ class PeerLifecycle:
         return local_membership
 
     async def drain(self, gate: asyncio.Event) -> Membership:
-        meta = self._meta_store.get()
+        if not self._recovering_done.is_set():
+            await self._recovering_done.wait()
 
+        meta = self._meta_store.get()
         if meta.phase in ("ready", "idle"):
             await gate.wait()
             meta = self._meta_store.get()
@@ -129,9 +134,11 @@ class PeerLifecycle:
 
         # Build the new ring by adding our vnodes
         new_ring = ring.add_vnodes(vnodes)
+        total = self._partitioner.total_partitions
+        yield_every = 256
 
         # For every partition, check if ownership changed
-        for pid in range(self._partitioner.total_partitions):
+        for idx, pid in enumerate(range(total)):
             end = self._partitioner.end_for_pid(pid)
 
             old_owner = ring.find_successor(end).node_id
@@ -140,20 +147,24 @@ class PeerLifecycle:
             if new_owner == membership.node_id and old_owner != new_owner:
                 stolen[old_owner].append(pid)
 
-            await asyncio.sleep(0.001)  # yield loop control
+            if idx % yield_every == 0:
+                await asyncio.sleep(0)  # yield loop control
 
         return stolen
 
     async def _discover_ring(self) -> Ring:
         vnodes: list[VNode] = []
         memberships = await self._bootstrap()
+        yield_every = 32
 
-        for membership in memberships:
+        for idx, membership in enumerate(memberships):
             self._view.add_or_update(membership)
             vnodes.extend(VNode.generate_vnodes(membership.node_id, membership.tokens))
-            await asyncio.sleep(0.001)  # yield loop control
             if not self._conns.has(membership.node_id):
                 self._conns.register(membership.node_id, membership.peer_address)
+
+            if idx % yield_every == 0:
+                await asyncio.sleep(0)  # yield loop control
 
         return Ring(vnodes)
 

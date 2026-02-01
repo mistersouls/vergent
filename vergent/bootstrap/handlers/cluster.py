@@ -100,7 +100,7 @@ async def forward(data: dict) -> Event:
     request_id = data["request_id"]
     placement = core.coordinator.find_key_placement(key)
     owner = placement.vnode
-    node_id = core.peer_state.membership.node_id
+    node_id = core.peer_config.node_id
     if owner.node_id != node_id:
         return Event(
             type="ko",

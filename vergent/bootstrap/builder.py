@@ -6,16 +6,13 @@ from vergent.core.bucket import BucketTable
 from vergent.core.config import ApiConfig, PeerConfig, ReplicationConfig
 from vergent.core.coordinator import Coordinator
 from vergent.core.facade import VergentCore
-from vergent.core.model.membership import Membership
 from vergent.core.model.partition import Partitioner
 from vergent.core.model.state import PeerState, NodeMeta
-from vergent.core.model.vnode import VNode
 from vergent.core.p2p.connection import PeerConnectionPool
 from vergent.core.p2p.hlc import HLC
 from vergent.core.ports.node import NodeMetaStore
 from vergent.core.replication import PartitionTransfer
 from vergent.core.ring import Ring
-from vergent.core.space import HashSpace
 from vergent.core.storage.partitionned import PartitionedStorage
 from vergent.core.storage.versionned import VersionedStorage
 from vergent.core.sub import Subscription
@@ -48,11 +45,11 @@ class CoreBuilder:
         server_ssl_ctx = self.config.get_server_ssl_ctx()
         client_ssl_ctx = self.config.get_client_ssl_ctx()
         api_config = self._build_api_config(server_ssl_ctx)
-        peer_config = self._build_peer_config(server_ssl_ctx, client_ssl_ctx)
+        peer_config = self._build_peer_config(server_ssl_ctx, client_ssl_ctx, node_meta)
         replication_config = self._build_replication_config(server_ssl_ctx)
 
 
-        peer_state = self._build_peer_state(node_meta, peer_config)
+        peer_state = self._build_peer_state()
 
         partitioner = Partitioner(self.config.placement.shift)
         storage = self._build_storage(partitioner)
@@ -68,6 +65,7 @@ class CoreBuilder:
         coordinator = Coordinator(
             peers=peer_clients,
             state=peer_state,
+            config=peer_config,
             partitioner=partitioner,
             subscription=subscription,
             storage=storage,
@@ -135,7 +133,8 @@ class CoreBuilder:
     def _build_peer_config(
         self,
         server_ssl_ctx: ssl.SSLContext,
-        client_ssl_ctx: ssl.SSLContext
+        client_ssl_ctx: ssl.SSLContext,
+        node_meta: NodeMeta,
     ) -> PeerConfig:
         server = self.config.server
         peer = server.peer
@@ -147,8 +146,8 @@ class CoreBuilder:
 
         peer_config = PeerConfig(
             app=self.peer,
-            node_id=self.config.node.id,
-            node_size=self.config.node.size,
+            node_id=node_meta.node_id,
+            node_size=node_meta.size,
             host=peer_host,
             port=peer_port,
             backlog=server.backlog,
@@ -181,7 +180,7 @@ class CoreBuilder:
         )
 
     @staticmethod
-    def _build_peer_state(meta: NodeMeta, config: PeerConfig) -> PeerState:
+    def _build_peer_state() -> PeerState:
         state = PeerState(
             ring=Ring(),
         )
