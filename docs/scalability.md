@@ -44,5 +44,3 @@ Capacity planning should start from:
 - Controlled tests demonstrate stable behavior under target load.
 - Ring changes and failure recovery remain within operational SLO boundaries.
 - Deterministic convergence remains true under scale and fault scenarios.
-
-

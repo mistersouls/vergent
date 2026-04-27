@@ -61,5 +61,3 @@ Each artifact must include:
 - mTLS is mandatory for all inter-node and client-node traffic.
 - Scaling assumptions and limits are documented for large clusters.
 - Test strategy covers determinism, faults, protocol, and security.
-
-

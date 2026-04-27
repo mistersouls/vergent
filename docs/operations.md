@@ -65,5 +65,3 @@ Each runbook SHOULD include detection signals, immediate mitigation, and verific
 - Restore procedure MUST validate ordering metadata integrity.
 - Upgrades SHOULD be rolling and version-compatible per `docs/protocol.md`.
 - Any irreversible upgrade step MUST have explicit rollback guidance.
-
-

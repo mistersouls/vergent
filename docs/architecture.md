@@ -68,5 +68,3 @@ Read flow (logical):
 - For a fixed ring version and key history, all healthy replicas MUST derive the same visible state.
 - Transport security is mandatory and described in `docs/security.md`.
 - Message contract and compatibility are defined in `docs/protocol.md`.
-
-

@@ -45,5 +45,3 @@ Sketch:
 
 Residual risk:
 - Long-lived partitions may delay convergence but must not produce contradictory final states once healed.
-
-

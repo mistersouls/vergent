@@ -62,4 +62,3 @@ Deliverables:
 
 Exit criteria:
 - Agreed scalability and reliability thresholds are met.
-

@@ -62,5 +62,3 @@ Retry rules:
 - Temporary errors MAY be retried with bounded backoff.
 - Non-retryable errors MUST be explicit.
 - Duplicate retries MUST not violate deterministic state evolution.
-
-

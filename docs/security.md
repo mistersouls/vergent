@@ -43,4 +43,3 @@ Primary threats:
 - Invalid or expired certificates are rejected deterministically.
 - Certificate rotation procedure is tested in staging.
 - Audit logs allow reconstruction of security incidents.
-
