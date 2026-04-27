@@ -37,12 +37,43 @@ Tourillon is currently in a specification-first phase. The repository defines ar
 
 ## Getting started
 
-If you want to understand or contribute now:
+### Understanding the project
 
 1. Read the project objective in `.github/prompts/objective.prompt.md`.
 2. Read the planning contract in `.github/prompts/plan-tourillon.prompt.md`.
-3. Follow the technical docs in `docs/` (architecture -> convergence -> protocol -> operations).
+3. Follow the technical docs in `docs/` (architecture → convergence → protocol → operations).
 4. Track implementation phases in `docs/roadmap.md`.
+
+### Development setup
+
+Tourillon uses [`uv`](https://docs.astral.sh/uv/) for environment and dependency management.
+
+```bash
+# Install uv (if not already installed)
+pip install uv
+
+# Install all dev dependencies
+uv sync --extra dev
+
+# Run the test suite
+uv run pytest
+
+# Run code quality checks (black + autoflake + misc hooks)
+uv run pre-commit run --all-files
+
+# Install pre-commit hooks into your local git checkout (one-time)
+uv run pre-commit install
+```
+
+### Contributing and Copilot instructions
+
+Development guidelines, code style rules, architecture invariants, and
+GitHub Copilot repository instructions are defined in
+[`.github/copilot-instructions.md`](.github/copilot-instructions.md).
+
+### License
+
+Distributed under the [Apache License 2.0](LICENSE).
 
 ## Documentation Map
 
@@ -59,9 +90,4 @@ If you want to understand or contribute now:
 
 ## Next milestone
 
-- Implement Milestone 1 foundation: single-node core, protocol framing, and deterministic update log.
-
-
-
-
-
+- Implement Milestone 1: single-node core, protocol framing, and deterministic update log.

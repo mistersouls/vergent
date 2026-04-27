@@ -25,12 +25,12 @@ jobs:
           python-version: "3.14"
 
       - name: Sync dev dependencies
-        run: uv sync --extra dev
+        run: uv sync --locked --extra dev
 
       - name: Check formatting (black)
         run: uv run black --check .
 
-      - name: Lint (ruff — includes McCabe C90)
+      - name: Lint (ruff - includes McCabe C90)
         run: uv run ruff check .
 
       - name: Cyclomatic complexity report (radon cc, fail if any block > 10)
@@ -57,7 +57,23 @@ jobs:
           python-version: "3.14"
 
       - name: Sync dev dependencies
-        run: uv sync --extra dev
+        run: uv sync --locked --extra dev
 
       - name: Run tests
         run: uv run pytest
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+
+      - name: Publish coverage comment on PR
+        if: github.event_name == 'pull_request'
+        uses: py-cov-action/python-coverage-comment-action@v3
+        with:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MINIMUM_GREEN: 90
+          MINIMUM_ORANGE: 75
+

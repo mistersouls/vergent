@@ -142,4 +142,3 @@ environment at hook runtime.
 - Do not bypass type annotations with `Any` unless truly unavoidable, and
   always add a `# noqa: ANN401` comment explaining why.
 - Do not generate code that violates the architecture invariants above.
-

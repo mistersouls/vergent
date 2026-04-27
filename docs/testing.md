@@ -50,4 +50,3 @@ Release gates SHOULD require:
 - Security baseline tests passing.
 - No unresolved deterministic divergence defects.
 - Performance and scalability thresholds within agreed bounds.
-
