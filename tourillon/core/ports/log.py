@@ -16,7 +16,7 @@
 from dataclasses import dataclass
 from typing import Protocol
 
-from tourillon.core.structure.version import Tombstone, Version
+from tourillon.core.structure.version import StoreKey, Tombstone, Version
 
 
 @dataclass(frozen=True)
@@ -48,9 +48,9 @@ class LogPort(Protocol):
     The first invariant is monotonic sequencing: every accepted entry receives
     a unique, strictly increasing sequence number starting at zero. The second
     is idempotency: submitting the same Version or Tombstone a second time,
-    identified by its key and full HLC metadata, must be a no-op that returns
-    None without altering the log, so that callers can safely re-submit entries
-    during recovery without producing duplicates.
+    identified by its address and full HLC metadata, must be a no-op that
+    returns None without altering the log, so that callers can safely
+    re-submit entries during recovery without producing duplicates.
     """
 
     @property
@@ -61,12 +61,12 @@ class LogPort(Protocol):
     async def append(self, entry: Version | Tombstone) -> LogEntry | None:
         """Persist a new entry and return its LogEntry, or return None if already seen.
 
-        The entry is considered a duplicate when another entry with the same key
-        and identical HLC metadata already exists in the log. Callers must treat
-        a None return as a confirmed no-op rather than an error.
+        The entry is considered a duplicate when another entry with the same
+        address and identical HLC metadata already exists in the log. Callers
+        must treat a None return as a confirmed no-op rather than an error.
         """
         ...
 
-    async def entries_for_key(self, key: str) -> list[LogEntry]:
-        """Return all log entries whose key matches, in insertion order."""
+    async def entries_for_address(self, address: StoreKey) -> list[LogEntry]:
+        """Return all log entries whose address matches, in insertion order."""
         ...

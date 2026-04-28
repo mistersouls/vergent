@@ -15,7 +15,7 @@
 
 from tourillon.core.ports.log import LogEntry
 from tourillon.core.structure.clock import HLCTimestamp
-from tourillon.core.structure.version import Tombstone, Version
+from tourillon.core.structure.version import StoreKey, Tombstone, Version
 from tourillon.infra.memory.log import MemoryLog
 
 
@@ -23,12 +23,18 @@ def _ts(wall: int, counter: int = 0, node: str = "n") -> HLCTimestamp:
     return HLCTimestamp(wall=wall, counter=counter, node_id=node)
 
 
-def _version(key: str = "k", wall: int = 1, value: bytes = b"v") -> Version:
-    return Version(key=key, metadata=_ts(wall), value=value)
+def _key(keyspace: bytes = b"ks", key: bytes = b"k") -> StoreKey:
+    return StoreKey(keyspace=keyspace, key=key)
 
 
-def _tombstone(key: str = "k", wall: int = 2) -> Tombstone:
-    return Tombstone(key=key, metadata=_ts(wall))
+def _version(
+    keyspace: bytes = b"ks", key: bytes = b"k", wall: int = 1, value: bytes = b"v"
+) -> Version:
+    return Version(address=_key(keyspace, key), metadata=_ts(wall), value=value)
+
+
+def _tombstone(keyspace: bytes = b"ks", key: bytes = b"k", wall: int = 2) -> Tombstone:
+    return Tombstone(address=_key(keyspace, key), metadata=_ts(wall))
 
 
 async def test_memorylog_append_version_increases_size() -> None:
@@ -84,38 +90,50 @@ async def test_memorylog_append_idempotent_does_not_increase_size() -> None:
 
 
 async def test_memorylog_append_different_metadata_is_not_duplicate() -> None:
-    """Two entries with the same key but different metadata are distinct."""
+    """Two entries with the same address but different metadata are distinct."""
     log = MemoryLog()
-    await log.append(_version(key="k", wall=1))
-    await log.append(_version(key="k", wall=2))
+    await log.append(_version(wall=1))
+    await log.append(_version(wall=2))
     assert log.size == 2
 
 
-async def test_memorylog_entries_for_key_returns_only_matching_key() -> None:
-    """entries_for_key must return only entries whose key matches."""
+async def test_memorylog_entries_for_address_returns_only_matching_address() -> None:
+    """entries_for_address must return only entries whose address matches."""
     log = MemoryLog()
-    await log.append(_version(key="a", wall=1))
-    await log.append(_version(key="b", wall=2))
-    await log.append(_version(key="a", wall=3))
-    result = await log.entries_for_key("a")
+    addr_a = _key(key=b"a")
+    await log.append(_version(key=b"a", wall=1))
+    await log.append(_version(key=b"b", wall=2))
+    await log.append(_version(key=b"a", wall=3))
+    result = await log.entries_for_address(addr_a)
     assert len(result) == 2
-    assert all(e.entry.key == "a" for e in result)
+    assert all(e.entry.address == addr_a for e in result)
 
 
-async def test_memorylog_entries_for_key_includes_tombstones() -> None:
-    """entries_for_key must include Tombstone entries for the key."""
+async def test_memorylog_entries_for_address_different_keyspace_not_returned() -> None:
+    """entries_for_address must not return entries from a different keyspace."""
     log = MemoryLog()
-    await log.append(_version(key="x", wall=1))
-    await log.append(_tombstone(key="x", wall=2))
-    result = await log.entries_for_key("x")
+    await log.append(_version(keyspace=b"ns1", key=b"k", wall=1))
+    await log.append(_version(keyspace=b"ns2", key=b"k", wall=2))
+    result = await log.entries_for_address(_key(keyspace=b"ns1", key=b"k"))
+    assert len(result) == 1
+    assert result[0].entry.address.keyspace == b"ns1"
+
+
+async def test_memorylog_entries_for_address_includes_tombstones() -> None:
+    """entries_for_address must include Tombstone entries for the address."""
+    log = MemoryLog()
+    addr = _key(key=b"x")
+    await log.append(_version(key=b"x", wall=1))
+    await log.append(_tombstone(key=b"x", wall=2))
+    result = await log.entries_for_address(addr)
     assert len(result) == 2
 
 
-async def test_memorylog_entries_for_key_empty_for_unknown_key() -> None:
-    """entries_for_key must return an empty list for a key never written."""
+async def test_memorylog_entries_for_address_empty_for_unknown_address() -> None:
+    """entries_for_address must return an empty list for an address never written."""
     log = MemoryLog()
-    await log.append(_version(key="a"))
-    assert await log.entries_for_key("z") == []
+    await log.append(_version(key=b"a"))
+    assert await log.entries_for_address(_key(key=b"z")) == []
 
 
 async def test_memorylog_size_is_zero_on_empty_log() -> None:

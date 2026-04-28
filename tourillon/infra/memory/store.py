@@ -13,6 +13,7 @@
 # limitations under the License.
 """In-memory implementation of LocalStoragePort."""
 
+from tourillon.core.ports.storage import DeleteOp, ReadOp, WriteOp
 from tourillon.core.structure.clock import HLCClock
 from tourillon.core.structure.version import Tombstone, Version
 from tourillon.infra.memory.log import MemoryLog
@@ -25,7 +26,7 @@ class MemoryStore:
     deterministic timestamp generation. Every write operation first advances
     the clock to obtain a causally ordered timestamp, then records the
     resulting Version or Tombstone in the log. Reads reconstruct the current
-    visible state by scanning the log entries for the requested key and
+    visible state by scanning the log entries for the requested address and
     applying last-write-wins semantics: the entry whose metadata is greatest
     according to the HLC total order wins, regardless of insertion order.
 
@@ -33,7 +34,7 @@ class MemoryStore:
     because HLCTimestamp defines a strict total order that includes the
     originating node_id as a tiebreaker. Two replicas that have applied the
     same set of events will always converge to the same visible value for
-    every key.
+    every address.
 
     MemoryStore holds no persistence guarantee. It is the reference adapter
     for Milestone 1, intended to validate the ordering model and serve as the
@@ -45,28 +46,28 @@ class MemoryStore:
         self._clock: HLCClock = HLCClock(node_id)
         self._log: MemoryLog = MemoryLog()
 
-    async def put(self, key: str, value: bytes, now_ms: int) -> Version:
-        """Record a new value for key and return the stamped Version.
+    async def put(self, op: WriteOp) -> Version:
+        """Record a new value and return the stamped Version.
 
-        The clock is ticked with now_ms before the Version is created, so the
-        returned timestamp is always strictly greater than every previous
+        The clock is ticked with op.now_ms before the Version is created, so
+        the returned timestamp is always strictly greater than every previous
         timestamp issued by this node.
         """
-        ts = self._clock.tick(now_ms)
-        version = Version(key=key, metadata=ts, value=value)
+        ts = self._clock.tick(op.now_ms)
+        version = Version(address=op.address, metadata=ts, value=op.value)
         await self._log.append(version)
         return version
 
-    async def get(self, key: str) -> list[Version]:
-        """Return the current visible value for key, or an empty list if absent.
+    async def get(self, op: ReadOp) -> list[Version]:
+        """Return the current visible value, or an empty list if absent.
 
-        All log entries for the key are retrieved and the one with the greatest
-        HLC metadata is selected as the winner. If the winning entry is a
-        Tombstone the key is considered deleted and an empty list is returned.
-        The list contains at most one element when the winning entry is a
-        Version.
+        All log entries for the address are retrieved and the one with the
+        greatest HLC metadata is selected as the winner. If the winning entry
+        is a Tombstone the address is considered deleted and an empty list is
+        returned. The list contains at most one element when the winning entry
+        is a Version.
         """
-        entries = await self._log.entries_for_key(key)
+        entries = await self._log.entries_for_address(op.address)
         if not entries:
             return []
         winner = max(entries, key=lambda le: le.entry.metadata)
@@ -74,13 +75,13 @@ class MemoryStore:
             return []
         return [winner.entry]
 
-    async def delete(self, key: str, now_ms: int) -> Tombstone:
-        """Record a deletion for key and return the stamped Tombstone.
+    async def delete(self, op: DeleteOp) -> Tombstone:
+        """Record a deletion and return the stamped Tombstone.
 
         The clock is ticked before the Tombstone is created, guaranteeing that
         the deletion causally follows every prior write issued by this node.
         """
-        ts = self._clock.tick(now_ms)
-        tombstone = Tombstone(key=key, metadata=ts)
+        ts = self._clock.tick(op.now_ms)
+        tombstone = Tombstone(address=op.address, metadata=ts)
         await self._log.append(tombstone)
         return tombstone

@@ -14,21 +14,22 @@
 """In-memory implementation of LogPort."""
 
 from tourillon.core.ports.log import LogEntry
-from tourillon.core.structure.version import Tombstone, Version
+from tourillon.core.structure.version import StoreKey, Tombstone, Version
 
-_Identity: type = tuple[str, int, int, str]
+_Identity: type = tuple[bytes, bytes, int, int, str]
 
 
 def _identity(entry: Version | Tombstone) -> _Identity:
     """Derive the deduplication key for a log entry.
 
-    The identity of an entry is fully determined by its key and the three
-    components of its HLC metadata. Two entries that share the same identity
-    are semantically identical regardless of the Python object that carries
-    them, which is the basis for the idempotency guarantee of MemoryLog.append.
+    The identity of an entry is fully determined by its address (keyspace and
+    key) and the three components of its HLC metadata. Two entries that share
+    the same identity are semantically identical regardless of the Python
+    object that carries them, which is the basis for the idempotency guarantee
+    of MemoryLog.append.
     """
     m = entry.metadata
-    return entry.key, m.wall, m.counter, m.node_id
+    return entry.address.keyspace, entry.address.key, m.wall, m.counter, m.node_id
 
 
 class MemoryLog:
@@ -73,6 +74,6 @@ class MemoryLog:
         self._entries.append(log_entry)
         return log_entry
 
-    async def entries_for_key(self, key: str) -> list[LogEntry]:
-        """Return all log entries whose key matches, in insertion order."""
-        return [le for le in self._entries if le.entry.key == key]
+    async def entries_for_address(self, address: StoreKey) -> list[LogEntry]:
+        """Return all log entries whose address matches, in insertion order."""
+        return [le for le in self._entries if le.entry.address == address]
