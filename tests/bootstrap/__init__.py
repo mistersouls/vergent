@@ -11,8 +11,3 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Bootstrap — wires concrete adapters into a fully operational node."""
-
-from tourillon.bootstrap.node import create_memory_node, create_tcp_node
-
-__all__ = ["create_memory_node", "create_tcp_node"]
