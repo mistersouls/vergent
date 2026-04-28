@@ -24,6 +24,7 @@ message rather than at the first incoming connection.
 """
 
 import asyncio
+import logging
 from pathlib import Path
 
 import typer
@@ -71,6 +72,12 @@ def start(
     performs a clean shutdown. Exit code is 0 on clean shutdown, 1 on
     configuration error, and 2 on unexpected runtime failure.
     """
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
     for label, path in [
         ("certfile", certfile),
         ("keyfile", keyfile),
@@ -90,12 +97,14 @@ def start(
                 cafile,
             )
         )
-        NodeRunner(server).run()
-        print_success(f"Node {node_id!r} stopped.")
     except TlsConfigurationError as exc:
         print_error(f"TLS configuration error: {exc}")
+        return
     except Exception as exc:
         print_error(f"Failed to assemble node: {exc}", exit_code=2)
+        return
 
     print_info(f"Node {node_id!r} starting on {host}:{port}")
     print_info("Press Ctrl-C or send SIGTERM to stop.")
+    NodeRunner(server).run()
+    print_success(f"Node {node_id!r} stopped.")

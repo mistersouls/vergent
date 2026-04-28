@@ -15,11 +15,13 @@
 
 from pathlib import Path
 
+from tourillon.bootstrap.handlers import KvHandlers
 from tourillon.core.dispatch import Dispatcher
 from tourillon.core.net.tcp.server import TcpServer
 from tourillon.core.net.tcp.tls import build_ssl_context
 from tourillon.core.ports.storage import LocalStoragePort
 from tourillon.infra.memory.store import MemoryStore
+from tourillon.infra.msgpack.serializer import MsgPackSerializer
 
 
 def create_memory_node(node_id: str) -> LocalStoragePort:
@@ -74,4 +76,6 @@ async def create_tcp_node(
 
     ssl_ctx = build_ssl_context(certfile, keyfile, cafile)
     active_dispatcher = dispatcher if dispatcher is not None else Dispatcher()
+    store = MemoryStore(node_id)
+    KvHandlers(store, MsgPackSerializer()).register(active_dispatcher)
     return TcpServer(host, port, ssl_ctx, active_dispatcher)
