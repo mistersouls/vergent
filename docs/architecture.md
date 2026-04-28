@@ -81,9 +81,46 @@ Each node SHOULD:
 - Expose health and readiness signals for load balancers.
 - Apply bounded backpressure under overload.
 
+## CLI Layer
+
+The `tourillon/infra/cli/` package is a **primary (driving) adapter** that lives
+in the `infra/` adapters layer alongside secondary adapters such as `memory/` and
+`pki/`. Grouping all adapters under `infra/` means adding a future delivery
+mechanism — `infra/api/` or `infra/grpc/` — follows the same pattern without
+touching `core/` or `bootstrap/`. The CLI does not participate in the distributed
+data path and takes no part in replication, ring management, or ordering.
+
+The CLI reaches inward only through two bootstrap factory entry points.
+`tourillon.bootstrap.node.create_tcp_node` is the single assembly factory that
+wires storage, dispatcher, TLS context, and TCP server together; the CLI calls it
+to start a node and otherwise has no dependency on any core domain object. PKI
+operations are routed through `tourillon.bootstrap.pki.create_pki_adapter`, which
+constructs the concrete PKI implementation and returns it typed as the
+`CertificateAuthorityPort` and `CertificateIssuerPort` protocols defined in
+`tourillon.core.ports.pki`; the CLI uses the port-defined request and response
+types (`CaRequest`, `CertRequest`, `PkiError`) and never imports `tourillon.infra`
+directly. The `cryptography` package is a mandatory Tourillon runtime dependency —
+no optional extra is required.
+
+This boundary means the CLI can be tested in full isolation using `typer.testing.CliRunner`
+and temporary directory fixtures, with no live sockets or TLS handshakes required.
+
+The CLI must never import core domain objects (clocks, envelopes, versions,
+log entries) directly. Any error originating in the core or infra layers is
+surfaced to the operator as a readable Rich error panel with an appropriate exit
+code; raw stack traces are never exposed.
+
+A thin `NodeRunner` shim in `tourillon/infra/cli/_runner.py` wraps the asyncio event
+loop and installs OS signal handlers for SIGINT and SIGTERM so that
+`tourillon node start` terminates cleanly on both POSIX and Windows.
+
+Future operational commands (ring inspect, log tail, cert rotate) follow the
+same pattern: they are registered on the root Typer application and delegate to
+existing port contracts or new infra adapters, never importing core internals.
+
 ## Transport Layer
 
-Tourillon uses a custom binary transport built on asyncio streams with mandatory
+Tourillon uses custom binary transport built on asyncio streams with mandatory
 mutual TLS. The transport is introduced alongside the single-node storage core so
 that end-to-end connectivity can be validated before replication logic is added.
 

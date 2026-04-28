@@ -1,6 +1,82 @@
 # Operations
 
-## Deployment Topologies
+## CLI Reference
+
+Tourillon ships a single `tourillon` entry point that exposes all operational
+commands. Install autocompletion once per shell with:
+
+```bash
+tourillon --install-completion
+```
+
+### PKI Bootstrap
+
+Before starting any node, generate the certificate hierarchy with the `pki`
+sub-commands. The CA private key must be kept offline and must never be copied
+to cluster nodes.
+
+**Generate the CA**
+
+```bash
+tourillon pki ca \
+  --common-name "Tourillon CA" \
+  --out-dir ./pki \
+  --days 3650
+```
+
+Writes `./pki/ca.crt` and `./pki/ca.key` (mode 0600). Aborts if either file
+already exists; pass `--force` to overwrite.
+
+**Issue a server certificate**
+
+```bash
+tourillon pki server \
+  --ca-cert ./pki/ca.crt \
+  --ca-key  ./pki/ca.key \
+  --common-name "node-1.internal" \
+  --san-dns node-1.internal \
+  --san-ip  10.0.0.1 \
+  --out-dir ./pki/node-1 \
+  --days 365
+```
+
+At least one `--san-dns` or `--san-ip` is required; a bare CN-only certificate
+is rejected because modern TLS clients ignore the CN field.
+
+**Issue a client certificate**
+
+```bash
+tourillon pki client \
+  --ca-cert ./pki/ca.crt \
+  --ca-key  ./pki/ca.key \
+  --common-name "client-app" \
+  --out-dir ./pki/clients/app \
+  --days 365
+```
+
+### Starting a Node
+
+```bash
+tourillon node start \
+  --node-id  node-1 \
+  --host     0.0.0.0 \
+  --port     7000 \
+  --certfile ./pki/node-1/server.crt \
+  --keyfile  ./pki/node-1/server.key \
+  --cafile   ./pki/ca.crt
+```
+
+The command validates all certificate paths before entering the asyncio loop.
+A Rich status panel is displayed while the node is running. Press Ctrl-C or
+send SIGTERM to shut down cleanly; the process exits with code 0.
+
+### Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| 0    | Success or clean shutdown |
+| 1    | User or configuration error |
+| 2    | Internal or unexpected error |
 
 Supported topologies SHOULD include:
 - Single-region multi-node cluster.

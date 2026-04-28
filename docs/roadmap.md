@@ -56,12 +56,39 @@ Deliverables:
 Exit criteria:
 - Multi-node convergence tests pass under failure/recovery scenarios.
 
+## Pre-Milestone 3: CLI and PKI Bootstrap
+
+Goal: provide operators with a production-ready CLI before the hardening phase
+begins. This milestone is the prerequisite for all certificate lifecycle
+automation planned in Milestone 3.
+
+Deliverables:
+- `tourillon pki ca` — generate a self-signed CA certificate and private key.
+- `tourillon pki server` — issue a server certificate signed by the CA, with
+  mandatory Subject Alternative Names (SAN).
+- `tourillon pki client` — issue a client certificate signed by the CA.
+- `tourillon node start` — start a single TCP node with mTLS, handling
+  SIGINT/SIGTERM cleanly.
+- `tourillon version` — display the installed version.
+- Shell autocompletion via `tourillon --install-completion`.
+- `tourillon/infra/pki/x509.py` adapter behind `core/ports/pki.py` Protocol
+  contracts so that certificate generation logic is reusable for cert rotation.
+- Production-quality UX: no raw stack traces, readable Rich output, semantic
+  exit codes, private key files written with mode 0600.
+
+Exit criteria:
+- `tourillon --help` and all sub-command `--help` pages render correctly.
+- An operator can bootstrap a CA, issue server and client certs, and start a
+  node pointing to those certs in a single terminal session.
+- Connections without valid mTLS certificates are still refused.
+- `pytest --cov-fail-under=90` continues to pass.
+
 ## Milestone 3: Operations and Hardening
 
 Goal: production-readiness baseline.
 
 Deliverables:
-- Full mTLS certificate lifecycle support.
+- Full mTLS certificate lifecycle support (rotation, renewal, revocation).
 - Observability, alerting, and runbooks.
 - Upgrade and backup/restore workflows.
 
