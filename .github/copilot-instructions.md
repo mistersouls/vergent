@@ -20,6 +20,31 @@ all traffic.
 
 ---
 
+## Asyncio rules — mandatory
+
+Tourillon is **fully asynchronous**. All I/O, networking, replication,
+handoff, repair, and coordination paths MUST use `asyncio`.
+
+- All new functions MUST be `async def` unless purely CPU-bound.
+- Use **TaskGroup** for structured concurrency (`asyncio.TaskGroup`).
+- Use **asyncio.timeout()** instead of `wait_for()`.
+- Use **asyncio.get_running_loop()**, never `get_event_loop()`.
+- Never block the event loop:
+  - no `time.sleep()`
+  - no sync file I/O
+  - no sync network calls
+- Use `await asyncio.to_thread(...)` for CPU-bound or blocking operations.
+- Never create orphan tasks; all tasks must be supervised by a TaskGroup.
+- Never use callbacks-based APIs; always prefer awaitable forms.
+- When suggesting concurrency patterns, prefer:
+  - TaskGroup
+  - Streams API (`asyncio.open_connection`, `asyncio.start_server`)
+  - `asyncio.Semaphore` for backpressure
+  - `asyncio.Event` for coordination
+- Never use deprecated asyncio APIs.
+
+---
+
 ## File header — mandatory
 
 Every `.py` file **must** start with this exact Apache 2.0 header block,
@@ -57,6 +82,27 @@ Always add this header when creating or suggesting a new `.py` file.
 - **Docstrings:** PEP 257. One-line summary ending with `.`; blank line before
   extended description; use imperative mood (`Return …`, `Raise …`).
 - No wildcard imports (`from x import *`). No unused imports or variables.
+- No comment like
+
+```python
+    # ------------------------------------------------------------------
+    # Write path
+    # -----------------------------
+```
+
+---
+
+## Protocol and API documentation — class-level and method-level
+
+All protocols, public classes, and public methods must include clear and
+contextual documentation that explains their purpose, their invariants, and
+their interaction with the rest of the system. Documentation should describe
+the intent behind the protocol, the expected sequencing of calls, the ordering
+guarantees, and any constraints that callers must respect. Prefer narrative
+sentences over bullet lists, and provide enough context for a new contributor
+to understand how the component fits into the distributed system. Internal
+helper functions should also be documented when their behavior is subtle or
+when they enforce important invariants.
 
 ---
 

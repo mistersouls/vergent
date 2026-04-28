@@ -24,6 +24,7 @@ dev = [
   "pre-commit-hooks>=4.6",
   # testing
   "pytest>=8",
+  "pytest-asyncio>=0.24",
   "pytest-cov>=5",
   # complexity analysis
   "radon>=6",
@@ -66,3 +67,4 @@ known-first-party = ["tourillon"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v --tb=short --cov=tourillon --cov-report=term-missing --cov-report=xml --cov-fail-under=90"
+asyncio_mode = "auto"

@@ -76,4 +76,3 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           MINIMUM_GREEN: 90
           MINIMUM_ORANGE: 75
-
