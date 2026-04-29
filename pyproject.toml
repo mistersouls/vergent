@@ -18,6 +18,7 @@ dependencies = [
 
 [project.scripts]
 tourillon = "tourillon.infra.cli.main:app"
+tourctl = "tourctl.bootstrap.main:app"
 
 [project.optional-dependencies]
 dev = [
@@ -40,7 +41,7 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["tourillon"]
+packages = ["tourillon", "tourctl"]
 
 # ---------------------------------------------------------------------------
 # Black
@@ -69,12 +70,12 @@ ignore = [
 max-complexity = 10
 
 [tool.ruff.lint.isort]
-known-first-party = ["tourillon"]
+known-first-party = ["tourillon", "tourctl"]
 
 # ---------------------------------------------------------------------------
 # Pytest
 # ---------------------------------------------------------------------------
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-v --tb=short --cov=tourillon --cov-report=term-missing --cov-report=xml --cov-fail-under=90"
+addopts = "-v --tb=short --cov=tourillon --cov=tourctl --cov-report=term-missing --cov-report=xml --cov-fail-under=90"
 asyncio_mode = "auto"
