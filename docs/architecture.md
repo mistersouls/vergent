@@ -136,7 +136,7 @@ until the process is restarted.
 
 **Why TOML and not YAML.** `tomllib` is stdlib; YAML would require `PyYAML` or
 `ruamel.yaml` as a third-party dependency. TOML's strict native typing (integers,
-booleans, arrays) maps directly onto the typed `TourilonConfig` dataclass and
+booleans, arrays) maps directly onto the typed `TourillonConfig` dataclass and
 eliminates an entire class of implicit-coercion bugs that YAML introduces (the
 Norway problem, `yes`/`no`/`on`/`off` booleans, octal literals). Both formats
 support inline comments and multi-line arrays; neither offers a meaningful
@@ -152,17 +152,17 @@ is accepted via the `--config` CLI flag. The `tourillon config generate` command
 issues a certificate on the fly and writes a fully self-contained config to the
 path supplied with `--out`.
 
-### TourilonConfig — canonical in-memory representation
+### TourillonConfig — canonical in-memory representation
 
-`tourillon/core/config.py` defines `TourilonConfig`, a frozen dataclass that is
+`tourillon/core/config.py` defines `TourillonConfig`, a frozen dataclass that is
 the single authoritative in-memory representation of all resolved configuration
 values. It is constructed by `tourillon.bootstrap.config.load_config`, which
 applies the precedence chain, validates every field, and raises a structured
 `ConfigError` on any violation. No other module reads the config file or
-environment variables directly; every subsystem receives a `TourilonConfig`
+environment variables directly; every subsystem receives a `TourillonConfig`
 instance injected through its constructor.
 
-`TourilonConfig` is a pure data object with no dependency on any infra adapter.
+`TourillonConfig` is a pure data object with no dependency on any infra adapter.
 It MUST be constructed and validated before any socket is bound, any file is
 opened, or any TLS context is created. The `[tls]` section is represented by
 `cert_data`, `key_data`, and `ca_data` fields containing base64-encoded PEM

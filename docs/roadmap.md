@@ -66,7 +66,7 @@ Deliverables:
   contracts so that certificate generation logic is reusable across
   `tourillon config generate`, `tourillon config generate-context`, and cert
   rotation.
-- `TourilonConfig` dataclass in `tourillon/core/config.py` as the canonical
+- `TourillonConfig` dataclass in `tourillon/core/config.py` as the canonical
   in-memory configuration representation, validated at startup before any I/O.
   Config values are resolved in precedence order: CLI flag > environment variable
   > config file > built-in default.
@@ -85,16 +85,11 @@ Exit criteria:
 - An mTLS-authenticated test peer can send a `put` envelope and receive a
   `put.ok`, verified through the TCP integration test suite
   (`core/net/tcp/testing.py`).
-- Connections without a valid mutual TLS certificate are refused on the
-  `servers.kv` listener.
+- Connections without valid mutual TLS certificates are refused.
 - `tourillon --help` and all sub-command `--help` pages render correctly.
-- An operator can run the full workflow in a single terminal session:
-  `tourillon pki ca` → `tourillon config generate` →
-  `tourillon config generate-context prod` →
-  `tourillon node start --config ./node-1.toml` →
-  `tourctl config use-context prod` → `tourctl kv put`.
-- `tourctl kv get/put/delete` complete successfully against a running node using
-  the active `tourctl` context.
+- An operator can bootstrap a CA, issue server and client certs, and start a
+  node pointing to those certs in a single terminal session.
+- `tourctl kv get/put/delete` complete successfully against a running node.
 - `pytest --cov-fail-under=90` passes.
 
 ## Milestone 2: Multi-node Replication and Partition Rebalance
@@ -102,36 +97,19 @@ Exit criteria:
 Goal: implement leaderless replication over a consistent-hashing ring with
 partition rebalancing, hinted handoff, and gossip-based membership.
 
-### Phase 2a — Ring, Membership and Peer Transport
+### Phase 2a — Ring and Membership
 
 Goal: establish a shared, self-consistent view of cluster topology so that every
-node can independently compute partition ownership without a coordinator, and
-introduce the second TCP listener that carries all inter-node and operator
-traffic.
+node can independently compute partition ownership without a coordinator.
 
 Deliverables:
-- **`servers.peer` TCP listener** — each node binds a second mTLS listener
-  dedicated to inter-node traffic (replication, gossip, hinted handoff) and
-  operator client connections from `tourctl`. Configured via `[servers.peer]` in
-  `config.toml` with `bind` and `advertise` fields (same schema as
-  `[servers.kv]`). The `servers.peer` SSL context uses a separate CA trust
-  anchor from `servers.kv`, allowing firewall rules and certificate policies to
-  enforce data-plane / control-plane separation.
-- `tourillon config generate` gains `--peer-bind <host:port>` and
-  `--peer-advertise <host:port>` flags; generated `config.toml` now includes the
-  `[servers.peer]` section.
-- `tourillon config generate-context` gains `--peer-endpoint <host:port>`; the
-  `[contexts.endpoints]` block in `contexts.toml` now supports both `kv` and
-  `peer` fields (both optional, at least one required).
 - `RingPort` Protocol defined in `core/ports/ring.py`, decoupling ring logic from
   transport and storage layers.
 - Consistent-hash ring implementing `StoreKey → token → partition → replica set`
   resolution.
-- Replication factor N read from `[cluster].replication_factor` in `config.toml`
-  (default 3); seed peers read from `[cluster].seeds`. Both fields activate in
-  M2; they are present but ignored by the single-node M1 runtime.
-- Gossip-based membership dissemination over the `servers.peer` listener covering
-  join, graceful leave, and failure detection (heartbeat + suspicion model).
+- Replication factor N exposed as a configurable parameter (default 3).
+- Gossip-based membership dissemination covering join, graceful leave, and
+  failure detection (heartbeat + suspicion model).
 - Deterministic partition ownership per ring version so that any two nodes
   compute identical replica sets for a given key at a given ring epoch.
 - Ring state versioned with a monotonic epoch; stale views are rejected on receipt.
@@ -217,8 +195,6 @@ Deliverables:
   across a live cluster without downtime.
 - Backup and restore procedures: documented, scripted, and validated against a
   representative data set in a test environment.
-- `tourctl config` commands: manage and display configuration settings,
-  including context management for multi-cluster setups.
 
 Exit criteria:
 - Certificate rotation completes on a running cluster with no connection
