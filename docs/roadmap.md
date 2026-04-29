@@ -40,31 +40,61 @@ Deliverables:
 - `Connection` adapter that frames and deframes `Envelope` objects over
   `StreamReader` / `StreamWriter` with `asyncio.Event`-based backpressure.
 - `tourillon pki ca` — generate a self-signed CA certificate and private key.
-- `tourillon pki server` — issue a server certificate signed by the CA, with
-  mandatory Subject Alternative Names (SAN).
-- `tourillon pki client` — issue a client certificate signed by the CA.
-- `tourillon node start` — start a single TCP node with mTLS, handling
-  SIGINT/SIGTERM cleanly.
+- `tourillon node start` — start a node with mTLS, handling SIGINT/SIGTERM
+  cleanly. The node binds a single TCP listener on `servers.kv` for client KV
+  traffic (put/get/delete) with mandatory mutual TLS. The startup form is
+  `tourillon node start --config ./node-1.toml`; individual override flags
+  such as `--node-id` or `--log-level` may be appended and always shadow the
+  corresponding config file value.
+- `tourillon config generate` — issue a server certificate signed by the
+  supplied CA, embed the certificate, private key, and CA certificate as base64
+  inline into a complete `config.toml`, and write it at mode `0600`. Accepts
+  `--node-id`, `--ca-cert`, `--ca-key`, `--san-dns`, `--san-ip`,
+  `--kv-bind <host:port>`, `--kv-advertise <host:port>` (optional),
+  and `--out`. Uses the same `tourillon/infra/pki/x509.py` PKI adapter as
+  `tourillon config generate-context`.
+- `tourillon config generate-context NAME` — issue a client certificate signed
+  by the supplied CA, embed the certificate, private key, and CA certificate as
+  base64 inline, and write (or update) a named context entry in
+  `~/.config/tourillon/contexts.toml` at mode `0600`. Accepts `--ca-cert`,
+  `--ca-key`, `--kv-endpoint <host:port>` (required in M1), `--common-name`
+  (optional, defaults to NAME), and `--days` (optional). Uses the same PKI
+  adapter as `tourillon config generate`.
 - `tourillon version` — display the installed version.
 - Shell autocompletion via `tourillon --install-completion`.
 - `tourillon/infra/pki/x509.py` adapter behind `core/ports/pki.py` Protocol
-  contracts so that certificate generation logic is reusable for cert rotation.
+  contracts so that certificate generation logic is reusable across
+  `tourillon config generate`, `tourillon config generate-context`, and cert
+  rotation.
+- `TourilonConfig` dataclass in `tourillon/core/config.py` as the canonical
+  in-memory configuration representation, validated at startup before any I/O.
+  Config values are resolved in precedence order: CLI flag > environment variable
+  > config file > built-in default.
 - Production-quality UX: no raw stack traces, readable Rich output, semantic
   exit codes, private key files written with mode 0600.
 - `tourctl` operator package with `tourctl kv get`, `tourctl kv put`, and
-  `tourctl kv delete` commands connecting to a live node over mTLS
-  (`tourctl/core/client.py`).
+  `tourctl kv delete` commands connecting to the node's `servers.kv` endpoint
+  over mTLS using the active context (`tourctl/core/client.py`).
+- `tourctl config use-context NAME` — set the active context in
+  `~/.config/tourillon/contexts.toml` so that subsequent `tourctl` commands
+  connect to the named cluster without requiring explicit flags.
+- `tourctl config list` — list all available contexts and mark the active one.
 
 Exit criteria:
 - Determinism tests pass for single-node put/get/delete workflows.
 - An mTLS-authenticated test peer can send a `put` envelope and receive a
   `put.ok`, verified through the TCP integration test suite
   (`core/net/tcp/testing.py`).
-- Connections without valid mutual TLS certificates are refused.
+- Connections without a valid mutual TLS certificate are refused on the
+  `servers.kv` listener.
 - `tourillon --help` and all sub-command `--help` pages render correctly.
-- An operator can bootstrap a CA, issue server and client certs, and start a
-  node pointing to those certs in a single terminal session.
-- `tourctl kv get/put/delete` complete successfully against a running node.
+- An operator can run the full workflow in a single terminal session:
+  `tourillon pki ca` → `tourillon config generate` →
+  `tourillon config generate-context prod` →
+  `tourillon node start --config ./node-1.toml` →
+  `tourctl config use-context prod` → `tourctl kv put`.
+- `tourctl kv get/put/delete` complete successfully against a running node using
+  the active `tourctl` context.
 - `pytest --cov-fail-under=90` passes.
 
 ## Milestone 2: Multi-node Replication and Partition Rebalance
@@ -72,19 +102,36 @@ Exit criteria:
 Goal: implement leaderless replication over a consistent-hashing ring with
 partition rebalancing, hinted handoff, and gossip-based membership.
 
-### Phase 2a — Ring and Membership
+### Phase 2a — Ring, Membership and Peer Transport
 
 Goal: establish a shared, self-consistent view of cluster topology so that every
-node can independently compute partition ownership without a coordinator.
+node can independently compute partition ownership without a coordinator, and
+introduce the second TCP listener that carries all inter-node and operator
+traffic.
 
 Deliverables:
+- **`servers.peer` TCP listener** — each node binds a second mTLS listener
+  dedicated to inter-node traffic (replication, gossip, hinted handoff) and
+  operator client connections from `tourctl`. Configured via `[servers.peer]` in
+  `config.toml` with `bind` and `advertise` fields (same schema as
+  `[servers.kv]`). The `servers.peer` SSL context uses a separate CA trust
+  anchor from `servers.kv`, allowing firewall rules and certificate policies to
+  enforce data-plane / control-plane separation.
+- `tourillon config generate` gains `--peer-bind <host:port>` and
+  `--peer-advertise <host:port>` flags; generated `config.toml` now includes the
+  `[servers.peer]` section.
+- `tourillon config generate-context` gains `--peer-endpoint <host:port>`; the
+  `[contexts.endpoints]` block in `contexts.toml` now supports both `kv` and
+  `peer` fields (both optional, at least one required).
 - `RingPort` Protocol defined in `core/ports/ring.py`, decoupling ring logic from
   transport and storage layers.
 - Consistent-hash ring implementing `StoreKey → token → partition → replica set`
   resolution.
-- Replication factor N exposed as a configurable parameter (default 3).
-- Gossip-based membership dissemination covering join, graceful leave, and
-  failure detection (heartbeat + suspicion model).
+- Replication factor N read from `[cluster].replication_factor` in `config.toml`
+  (default 3); seed peers read from `[cluster].seeds`. Both fields activate in
+  M2; they are present but ignored by the single-node M1 runtime.
+- Gossip-based membership dissemination over the `servers.peer` listener covering
+  join, graceful leave, and failure detection (heartbeat + suspicion model).
 - Deterministic partition ownership per ring version so that any two nodes
   compute identical replica sets for a given key at a given ring epoch.
 - Ring state versioned with a monotonic epoch; stale views are rejected on receipt.
@@ -170,6 +217,8 @@ Deliverables:
   across a live cluster without downtime.
 - Backup and restore procedures: documented, scripted, and validated against a
   representative data set in a test environment.
+- `tourctl config` commands: manage and display configuration settings,
+  including context management for multi-cluster setups.
 
 Exit criteria:
 - Certificate rotation completes on a running cluster with no connection

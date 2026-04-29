@@ -118,6 +118,134 @@ Future operational commands (ring inspect, log tail, cert rotate) follow the
 same pattern: they are registered on the root Typer application and delegate to
 existing port contracts or new infra adapters, never importing core internals.
 
+## Configuration Layer
+
+Tourillon resolves its runtime parameters through a four-level precedence chain:
+CLI flag > environment variable > config file > built-in default. A value
+supplied at a higher precedence level always shadows the same value at a lower
+level. This allows operators to ship a base config file per node and still
+override individual settings for a single invocation without editing the file.
+
+### Config file format and location
+
+The config file is a TOML document parsed at startup using the Python standard
+library `tomllib` module (read-only, Python 3.11+). The file is read once,
+validated, and then discarded; it is never written or modified at runtime.
+If the file changes on disk while a node is running the changes have no effect
+until the process is restarted.
+
+**Why TOML and not YAML.** `tomllib` is stdlib; YAML would require `PyYAML` or
+`ruamel.yaml` as a third-party dependency. TOML's strict native typing (integers,
+booleans, arrays) maps directly onto the typed `TourilonConfig` dataclass and
+eliminates an entire class of implicit-coercion bugs that YAML introduces (the
+Norway problem, `yes`/`no`/`on`/`off` booleans, octal literals). Both formats
+support inline comments and multi-line arrays; neither offers a meaningful
+authoring advantage for this use case. Writing TOML for `config generate` is done
+with `tomli-w`, a small well-maintained library with no transitive dependencies;
+this is the only additional runtime dependency the config system introduces. YAML's
+single advantage — familiarity to Kubernetes operators — does not outweigh these
+costs, given the project philosophy of preferring stdlib over third-party
+dependencies unless there is a meaningful complexity reduction.
+
+The default location is `~/.config/tourillon/config.toml`. An alternate path
+is accepted via the `--config` CLI flag. The `tourillon config generate` command
+issues a certificate on the fly and writes a fully self-contained config to the
+path supplied with `--out`.
+
+### TourilonConfig — canonical in-memory representation
+
+`tourillon/core/config.py` defines `TourilonConfig`, a frozen dataclass that is
+the single authoritative in-memory representation of all resolved configuration
+values. It is constructed by `tourillon.bootstrap.config.load_config`, which
+applies the precedence chain, validates every field, and raises a structured
+`ConfigError` on any violation. No other module reads the config file or
+environment variables directly; every subsystem receives a `TourilonConfig`
+instance injected through its constructor.
+
+`TourilonConfig` is a pure data object with no dependency on any infra adapter.
+It MUST be constructed and validated before any socket is bound, any file is
+opened, or any TLS context is created. The `[tls]` section is represented by
+`cert_data`, `key_data`, and `ca_data` fields containing base64-encoded PEM
+material; no `*file` path fields exist in the config schema.
+
+### Dual-endpoint model
+
+Each Tourillon node MUST expose two distinct TCP listeners, configured
+independently in the `[servers]` section of the config file:
+
+- **`servers.kv`** — serves client data-plane traffic: `put`, `get`, and
+  `delete` operations. This is the address application clients and load
+  balancers connect to. The mTLS context for this listener MUST trust a client
+  CA that is authoritative for application clients, which MAY differ from the
+  peer CA.
+
+- **`servers.peer`** — serves both inter-node traffic (replication, gossip,
+  hinted handoff) and operator client connections from `tourctl`. This listener
+  SHOULD be bound to an interface reachable by cluster peers and operators but
+  not necessarily exposed to the public data plane. Its mTLS context SHOULD
+  trust a separate peer/operator CA, allowing firewall rules and certificate
+  policies to enforce strict separation between data-plane and peer-plane
+  clients.
+
+Each endpoint is described by a `bind` address (the `host:port` the OS socket
+listens on) and an `advertise` address (the `host:port` gossiped to peers and
+returned to clients for routing). These differ when the node runs behind NAT, a
+load balancer, or a container port mapping; `advertise` defaults to `bind` when
+omitted.
+
+Keeping the two listeners independent means the node can enforce separate mTLS
+trust anchors, different client certificate requirements, and distinct network
+policies per plane without any shared state between the two SSL contexts. Both
+listeners use the same server certificate and private key (the node's identity)
+but MUST configure separate `ssl.SSLContext` instances.
+
+### tourctl contexts
+
+`tourctl` — the operator client binary — stores named cluster connections in
+`~/.config/tourillon/contexts.toml`. Each context entry is composed of:
+
+- A **cluster** block: a logical cluster name and the CA certificate used to
+  verify the cluster's nodes.
+- An **endpoints** block: an optional `kv` field (`host:port`) pointing to the
+  node's `servers.kv` listener, and an optional `peer` field (`host:port`)
+  pointing to the node's `servers.peer` listener. At least one must be present.
+  A context exposing only `kv` is valid for `tourctl kv` commands; a context
+  exposing only `peer` is valid for operator commands such as `tourctl ring
+  inspect` and `tourctl log tail`.
+- A **credentials** block: the client certificate and private key that `tourctl`
+  presents when connecting to either endpoint.
+
+The file also stores a single `current-context` key naming the active context.
+When present, `tourctl` uses that context for all connections without requiring
+explicit `--context` flags. `tourillon config generate-context` issues a client
+certificate signed by the supplied CA and writes a fully self-contained context
+entry; `tourctl config use-context` updates `current-context` and
+`tourctl config list` displays all available contexts with the active one marked.
+`tourctl` never issues certificates or writes PKI material — it only reads and
+navigates the contexts file. These files are never modified by a running
+`tourillon` node process.
+
+#### Certificate storage: inline base64
+
+All Tourillon config files — both `config.toml` and `contexts.toml` — store
+certificate and key material as **inline base64-encoded PEM** exclusively. There
+are no `*file` path variants. This design eliminates the dual-representation
+complexity and makes every config file fully self-contained.
+
+Both files are written at mode `0600` because both embed private key material.
+A single `write_config_file(path, payload, mode=0o600)` utility in the bootstrap
+layer is the only code path allowed to write either file; callers never invoke
+`os.chmod` directly.
+
+`tourillon config generate` and `tourillon config generate-context` both invoke
+the CA/issuer port to sign a new certificate before writing the config. The
+operator only ever supplies `--ca-cert` and `--ca-key`; they are never asked to
+provide a pre-existing leaf certificate. `tourctl` never touches PKI material.
+
+`tourillon config generate-context` MUST write to a temporary file and atomically
+replace the existing contexts file with `os.replace` so a crash mid-write never
+corrupts the active context list.
+
 ## Transport Layer
 
 Tourillon uses custom binary transport built on asyncio streams with mandatory
