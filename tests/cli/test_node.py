@@ -13,9 +13,22 @@
 # limitations under the License.
 """Tests for tourillon CLI node commands."""
 
+import re
+from pathlib import Path
+
 from typer.testing import CliRunner
 
 from tourillon.infra.cli.main import app
+
+
+def _strip_ansi(text: str) -> str:
+    """Strip ANSI escape sequences from text.
+
+    Typer injects Rich ANSI terminal codes even when the CliRunner writes to
+    an in-memory buffer.  Stripping them before asserting on plain-text content
+    makes the tests independent of whether Rich colour output is enabled.
+    """
+    return re.sub(r"\x1b\[[^a-zA-Z]*[a-zA-Z]", "", text)
 
 
 def test_node_start_missing_certfile_exits_with_error() -> None:
@@ -28,11 +41,11 @@ def test_node_start_missing_certfile_exits_with_error() -> None:
             "--node-id",
             "n1",
             "--certfile",
-            "C:\\nonexistent\\cert.crt",
+            str(Path("/nonexistent/cert.crt")),
             "--keyfile",
-            "C:\\nonexistent\\key.key",
+            str(Path("/nonexistent/key.key")),
             "--cafile",
-            "C:\\nonexistent\\ca.crt",
+            str(Path("/nonexistent/ca.crt")),
         ],
         catch_exceptions=True,
     )
@@ -43,7 +56,7 @@ def test_node_start_help_renders_shows_node_id() -> None:
     runner = CliRunner()
     result = runner.invoke(app, ["node", "start", "--help"], catch_exceptions=False)
     assert result.exit_code == 0
-    assert "--node-id" in result.output
+    assert "--node-id" in _strip_ansi(result.output)
 
 
 def test_version_command_outputs_version() -> None:
