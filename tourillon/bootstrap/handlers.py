@@ -41,6 +41,7 @@ match replies to outstanding requests.
 
 import logging
 import time
+from collections.abc import Callable
 
 from tourillon.core.dispatch import Dispatcher
 from tourillon.core.ports.serializer import SerializerPort
@@ -59,11 +60,6 @@ KIND_KV_DELETE_OK: str = "kv.delete.ok"
 KIND_KV_ERR: str = "kv.err"
 
 _logger = logging.getLogger(__name__)
-
-
-def _now_ms() -> int:
-    """Return the current wall time in milliseconds as a physical clock hint."""
-    return int(time.time() * 1000)
 
 
 def _err_envelope(
@@ -92,10 +88,27 @@ class KvHandlers:
     implementation and the SerializerPort is stateless.
     """
 
-    def __init__(self, store: LocalStoragePort, serializer: SerializerPort) -> None:
-        """Attach to the given storage port and serializer for all KV operations."""
+    def __init__(
+        self,
+        store: LocalStoragePort,
+        serializer: SerializerPort,
+        now_ms_provider: Callable[[], int] | None = None,
+    ) -> None:
+        """Attach to the given storage port and serializer for all KV operations.
+
+        The optional now_ms_provider is called to obtain the current logical
+        wall-clock hint (in milliseconds) when a client request omits the
+        now_ms field. When None the provider defaults to a monotonic-based
+        millisecond clock. Production node assembly should supply a node-level
+        HLC provider; the default is safe for testing and single-node scenarios.
+        """
         self._store = store
         self._serializer = serializer
+        self._now_ms: Callable[[], int] = (
+            now_ms_provider
+            if now_ms_provider is not None
+            else (lambda: int(time.monotonic() * 1000))
+        )
 
     def register(self, dispatcher: Dispatcher) -> None:
         """Register all three KV handler methods on dispatcher.
@@ -112,13 +125,13 @@ class KvHandlers:
 
         The request payload must decode to a map with binary fields "keyspace",
         "key", "value", and an optional integer field "now_ms". When "now_ms" is
-        absent the server derives it from the current wall clock. The response
+        absent the server derives it from the configured wall-clock provider. The response
         payload encodes the three fields of the HLCTimestamp assigned by the store.
         """
         try:
             data = self._serializer.decode(envelope.payload)
             address = StoreKey(keyspace=data["keyspace"], key=data["key"])
-            now_ms: int = data.get("now_ms", _now_ms())
+            now_ms: int = data.get("now_ms", self._now_ms())
             op = WriteOp(address=address, value=data["value"], now_ms=now_ms)
             version = await self._store.put(op)
         except Exception as exc:
@@ -191,7 +204,7 @@ class KvHandlers:
         try:
             data = self._serializer.decode(envelope.payload)
             address = StoreKey(keyspace=data["keyspace"], key=data["key"])
-            now_ms = data.get("now_ms", _now_ms())
+            now_ms = data.get("now_ms", self._now_ms())
             op = DeleteOp(address=address, now_ms=now_ms)
             tombstone = await self._store.delete(op)
         except Exception as exc:

@@ -27,7 +27,7 @@ import importlib.metadata
 
 import typer
 
-from tourctl.bootstrap.commands import kv
+from tourctl.bootstrap.commands import config, kv
 from tourillon.infra.cli.error import configure_error_hook
 from tourillon.infra.cli.output import make_console, print_info
 
@@ -38,6 +38,7 @@ app = typer.Typer(
     pretty_exceptions_enable=False,
 )
 
+app.add_typer(config.app)
 app.add_typer(kv.app)
 
 configure_error_hook(make_console())

@@ -31,32 +31,30 @@ def _strip_ansi(text: str) -> str:
     return re.sub(r"\x1b\[[^a-zA-Z]*[a-zA-Z]", "", text)
 
 
-def test_node_start_missing_certfile_exits_with_error() -> None:
+def test_node_start_missing_config_exits_with_error() -> None:
+    """node start with a nonexistent --config path must exit non-zero."""
     runner = CliRunner()
     result = runner.invoke(
         app,
         [
             "node",
             "start",
-            "--node-id",
-            "n1",
-            "--certfile",
-            str(Path("/nonexistent/cert.crt")),
-            "--keyfile",
-            str(Path("/nonexistent/key.key")),
-            "--cafile",
-            str(Path("/nonexistent/ca.crt")),
+            "--config",
+            str(Path("/nonexistent/node.toml")),
         ],
         catch_exceptions=True,
     )
     assert result.exit_code != 0
 
 
-def test_node_start_help_renders_shows_node_id() -> None:
+def test_node_start_help_renders_config_and_node_id() -> None:
+    """node start --help must show both --config and --node-id override flags."""
     runner = CliRunner()
     result = runner.invoke(app, ["node", "start", "--help"], catch_exceptions=False)
     assert result.exit_code == 0
-    assert "--node-id" in _strip_ansi(result.output)
+    text = _strip_ansi(result.output)
+    assert "--config" in text
+    assert "--node-id" in text
 
 
 def test_version_command_outputs_version() -> None:

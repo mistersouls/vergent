@@ -25,8 +25,11 @@ Command tree:
             ca           — generate a self-signed CA
             server       — issue a server certificate
             client       — issue a client certificate
+        config
+            generate         — issue a server cert and write a config.toml
+            generate-context — issue a client cert and write a context entry
         node
-            start        — start a node with mTLS
+            start        — start a node with mTLS (--config ./node-1.toml)
 
 Shell autocompletion (bash, zsh, fish, PowerShell) is available via:
 
@@ -37,7 +40,7 @@ import importlib.metadata
 
 import typer
 
-from tourillon.infra.cli.commands import node, pki
+from tourillon.infra.cli.commands import config, node, pki
 from tourillon.infra.cli.error import configure_error_hook
 from tourillon.infra.cli.output import make_console, print_info
 
@@ -49,6 +52,7 @@ app = typer.Typer(
 )
 
 app.add_typer(pki.app)
+app.add_typer(config.app)
 app.add_typer(node.app)
 
 configure_error_hook(make_console())

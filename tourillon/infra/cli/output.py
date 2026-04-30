@@ -18,6 +18,7 @@ formatting is consistent across commands. Never use print() directly.
 """
 
 import sys
+from typing import NoReturn
 
 import rich.console
 import rich.panel
@@ -48,7 +49,7 @@ def print_success(message: str) -> None:
     )
 
 
-def print_error(message: str, exit_code: int = 1) -> None:
+def print_error(message: str, exit_code: int = 1) -> NoReturn:
     """Print a red error panel and exit the process with exit_code."""
     _console.print(
         rich.panel.Panel(

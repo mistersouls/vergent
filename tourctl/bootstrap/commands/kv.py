@@ -17,19 +17,20 @@ Exposes three commands — ``put``, ``get``, ``delete`` — that connect to a
 running Tourillon node over mTLS and perform the corresponding operation using
 the KV wire protocol defined in ``tourillon.bootstrap.handlers``.
 
-Every command follows the same structure:
+Each command operates in one of two connection modes:
 
-1. Call ``deps.configure()`` to validate certificates and build the SSL
-   context. Exit immediately with a clear message on ``TlsConfigurationError``.
-2. Build the msgpack payload and send it as an ``Envelope`` to the node.
-3. Decode the response and render it with Rich.
-4. Map each known error type (``NodeUnreachableError``, ``RequestTimeoutError``,
-   ``ServerError``) to a human-readable message and a non-zero exit code.
+1. **Active context** (preferred): when no explicit --certfile / --keyfile /
+   --cafile flags are supplied, the command reads the active context from
+   ~/.config/tourillon/contexts.toml (set via ``tourctl config use-context``)
+   and derives the host, port, and SSL context from the context's inline
+   base64 TLS material.
 
-Connection options (``--host``, ``--port``, ``--certfile``, ``--keyfile``,
-``--cafile``, ``--timeout``) are repeated on every command because each
-command is independently invocable. A future ``--config`` option can replace
-them with a single config file path once the configuration layer is introduced.
+2. **Explicit flags**: when --certfile, --keyfile, and --cafile are all
+   supplied, the command uses those file paths directly and --host / --port
+   must also be specified.
+
+Connection options are optional in mode 1 (active context) and required in
+mode 2 (explicit flags).
 """
 
 import asyncio
@@ -44,6 +45,7 @@ from tourillon.bootstrap.handlers import (
     KIND_KV_GET,
     KIND_KV_PUT,
 )
+from tourillon.core.config import ConfigError
 from tourillon.core.net.tcp.tls import TlsConfigurationError
 from tourillon.core.structure.envelope import Envelope
 from tourillon.infra.cli.output import (
@@ -57,22 +59,79 @@ app = typer.Typer(name="kv", help="Key-value operations against a Tourillon node
 
 _CONNECTION_OPTIONS = "Connection"
 
+_OPT_HOST = typer.Option(
+    "127.0.0.1",
+    "--host",
+    rich_help_panel=_CONNECTION_OPTIONS,
+    help="Node hostname or IP. Used when providing explicit cert flags.",
+    show_default=True,
+)
+_OPT_PORT = typer.Option(
+    7000,
+    "--port",
+    show_default=True,
+    rich_help_panel=_CONNECTION_OPTIONS,
+    help="Node TCP port. Used when providing explicit cert flags.",
+)
+_OPT_CERTFILE = typer.Option(
+    None,
+    "--certfile",
+    rich_help_panel=_CONNECTION_OPTIONS,
+    help="Client PEM certificate. Use with --keyfile and --cafile.",
+)
+_OPT_KEYFILE = typer.Option(
+    None,
+    "--keyfile",
+    rich_help_panel=_CONNECTION_OPTIONS,
+    help="Client PEM private key. Use with --certfile and --cafile.",
+)
+_OPT_CAFILE = typer.Option(
+    None,
+    "--cafile",
+    rich_help_panel=_CONNECTION_OPTIONS,
+    help="CA certificate bundle. Use with --certfile and --keyfile.",
+)
+_OPT_TIMEOUT = typer.Option(
+    10.0,
+    "--timeout",
+    show_default=True,
+    rich_help_panel=_CONNECTION_OPTIONS,
+    help="Request deadline in seconds.",
+)
+
+
+def _setup_connection(
+    host: str,
+    port: int,
+    certfile: Path | None,
+    keyfile: Path | None,
+    cafile: Path | None,
+    timeout: float,
+) -> None:
+    """Configure deps for the active connection mode.
+
+    When all three cert flags are supplied, use explicit file-path mode.
+    Otherwise fall back to the active context from contexts.toml.
+    Raise on any configuration error so the caller can surface a clean message.
+    """
+    explicit = certfile is not None and keyfile is not None and cafile is not None
+    if explicit:
+        deps.configure(host, port, certfile, keyfile, cafile, timeout=timeout)
+    else:
+        try:
+            deps.configure_from_active_context(timeout=timeout)
+        except ConfigError as exc:
+            print_error(str(exc))
+
 
 def _handle_client_error(
     exc: Exception,
-    host: str,
-    port: int,
     timeout: float,
 ) -> None:
-    """Map known client errors to Rich output and exit.
-
-    This helper centralises the error-to-message mapping so each command does
-    not repeat the same match logic. ``print_error`` always calls ``sys.exit``
-    so this function never returns normally.
-    """
+    """Map known client errors to Rich output and exit."""
     match exc:
         case NodeUnreachableError():
-            print_error(f"Cannot reach node at {host}:{port} — is it running?")
+            print_error("Cannot reach node — is it running?")
         case RequestTimeoutError():
             print_error(f"Request timed out after {timeout}s — node may be overloaded.")
         case ServerError():
@@ -96,48 +155,16 @@ def put(
     value: str = typer.Option(
         ..., "--value", "-v", help="Value to associate with the key."
     ),
-    host: str = typer.Option(
-        "127.0.0.1",
-        "--host",
-        rich_help_panel=_CONNECTION_OPTIONS,
-        help="Node hostname or IP.",
-    ),
-    port: int = typer.Option(
-        7000,
-        "--port",
-        show_default=True,
-        rich_help_panel=_CONNECTION_OPTIONS,
-        help="Node TCP port.",
-    ),
-    certfile: Path = typer.Option(
-        ...,
-        "--certfile",
-        rich_help_panel=_CONNECTION_OPTIONS,
-        help="Client PEM certificate.",
-    ),
-    keyfile: Path = typer.Option(
-        ...,
-        "--keyfile",
-        rich_help_panel=_CONNECTION_OPTIONS,
-        help="Client PEM private key.",
-    ),
-    cafile: Path = typer.Option(
-        ...,
-        "--cafile",
-        rich_help_panel=_CONNECTION_OPTIONS,
-        help="CA certificate bundle for server verification.",
-    ),
-    timeout: float = typer.Option(
-        10.0,
-        "--timeout",
-        show_default=True,
-        rich_help_panel=_CONNECTION_OPTIONS,
-        help="Request deadline in seconds.",
-    ),
+    host: str = _OPT_HOST,
+    port: int = _OPT_PORT,
+    certfile: Path | None = _OPT_CERTFILE,
+    keyfile: Path | None = _OPT_KEYFILE,
+    cafile: Path | None = _OPT_CAFILE,
+    timeout: float = _OPT_TIMEOUT,
 ) -> None:
     """Write a key/value pair into a keyspace on the target node."""
     try:
-        deps.configure(host, port, certfile, keyfile, cafile, timeout=timeout)
+        _setup_connection(host, port, certfile, keyfile, cafile, timeout)
     except TlsConfigurationError as exc:
         print_error(str(exc))
 
@@ -166,7 +193,7 @@ def put(
     try:
         asyncio.run(_run())
     except (NodeUnreachableError, RequestTimeoutError, ServerError, ValueError) as exc:
-        _handle_client_error(exc, host, port, timeout)
+        _handle_client_error(exc, timeout)
 
 
 @app.command()
@@ -175,48 +202,16 @@ def get(
         "default", "--keyspace", "-n", show_default=True, help="Keyspace to read from."
     ),
     key: str = typer.Option(..., "--key", "-k", help="Key to read."),
-    host: str = typer.Option(
-        "127.0.0.1",
-        "--host",
-        rich_help_panel=_CONNECTION_OPTIONS,
-        help="Node hostname or IP.",
-    ),
-    port: int = typer.Option(
-        7000,
-        "--port",
-        show_default=True,
-        rich_help_panel=_CONNECTION_OPTIONS,
-        help="Node TCP port.",
-    ),
-    certfile: Path = typer.Option(
-        ...,
-        "--certfile",
-        rich_help_panel=_CONNECTION_OPTIONS,
-        help="Client PEM certificate.",
-    ),
-    keyfile: Path = typer.Option(
-        ...,
-        "--keyfile",
-        rich_help_panel=_CONNECTION_OPTIONS,
-        help="Client PEM private key.",
-    ),
-    cafile: Path = typer.Option(
-        ...,
-        "--cafile",
-        rich_help_panel=_CONNECTION_OPTIONS,
-        help="CA certificate bundle for server verification.",
-    ),
-    timeout: float = typer.Option(
-        10.0,
-        "--timeout",
-        show_default=True,
-        rich_help_panel=_CONNECTION_OPTIONS,
-        help="Request deadline in seconds.",
-    ),
+    host: str = _OPT_HOST,
+    port: int = _OPT_PORT,
+    certfile: Path | None = _OPT_CERTFILE,
+    keyfile: Path | None = _OPT_KEYFILE,
+    cafile: Path | None = _OPT_CAFILE,
+    timeout: float = _OPT_TIMEOUT,
 ) -> None:
     """Read the current value for a key from the target node."""
     try:
-        deps.configure(host, port, certfile, keyfile, cafile, timeout=timeout)
+        _setup_connection(host, port, certfile, keyfile, cafile, timeout)
     except TlsConfigurationError as exc:
         print_error(str(exc))
 
@@ -258,7 +253,7 @@ def get(
     try:
         asyncio.run(_run())
     except (NodeUnreachableError, RequestTimeoutError, ServerError, ValueError) as exc:
-        _handle_client_error(exc, host, port, timeout)
+        _handle_client_error(exc, timeout)
 
 
 @app.command()
@@ -271,48 +266,16 @@ def delete(
         help="Keyspace containing the key.",
     ),
     key: str = typer.Option(..., "--key", "-k", help="Key to delete."),
-    host: str = typer.Option(
-        "127.0.0.1",
-        "--host",
-        rich_help_panel=_CONNECTION_OPTIONS,
-        help="Node hostname or IP.",
-    ),
-    port: int = typer.Option(
-        7000,
-        "--port",
-        show_default=True,
-        rich_help_panel=_CONNECTION_OPTIONS,
-        help="Node TCP port.",
-    ),
-    certfile: Path = typer.Option(
-        ...,
-        "--certfile",
-        rich_help_panel=_CONNECTION_OPTIONS,
-        help="Client PEM certificate.",
-    ),
-    keyfile: Path = typer.Option(
-        ...,
-        "--keyfile",
-        rich_help_panel=_CONNECTION_OPTIONS,
-        help="Client PEM private key.",
-    ),
-    cafile: Path = typer.Option(
-        ...,
-        "--cafile",
-        rich_help_panel=_CONNECTION_OPTIONS,
-        help="CA certificate bundle for server verification.",
-    ),
-    timeout: float = typer.Option(
-        10.0,
-        "--timeout",
-        show_default=True,
-        rich_help_panel=_CONNECTION_OPTIONS,
-        help="Request deadline in seconds.",
-    ),
+    host: str = _OPT_HOST,
+    port: int = _OPT_PORT,
+    certfile: Path | None = _OPT_CERTFILE,
+    keyfile: Path | None = _OPT_KEYFILE,
+    cafile: Path | None = _OPT_CAFILE,
+    timeout: float = _OPT_TIMEOUT,
 ) -> None:
     """Delete a key from the target node (produces a Tombstone)."""
     try:
-        deps.configure(host, port, certfile, keyfile, cafile, timeout=timeout)
+        _setup_connection(host, port, certfile, keyfile, cafile, timeout)
     except TlsConfigurationError as exc:
         print_error(str(exc))
 
@@ -337,4 +300,4 @@ def delete(
     try:
         asyncio.run(_run())
     except (NodeUnreachableError, RequestTimeoutError, ServerError, ValueError) as exc:
-        _handle_client_error(exc, host, port, timeout)
+        _handle_client_error(exc, timeout)

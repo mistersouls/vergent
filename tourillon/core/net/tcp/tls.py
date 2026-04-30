@@ -15,6 +15,7 @@
 
 import os
 import ssl
+import tempfile
 from pathlib import Path
 
 MINIMUM_TLS_VERSION: ssl.TLSVersion = ssl.TLSVersion.TLSv1_3
@@ -95,5 +96,74 @@ def build_ssl_context(
         raise TlsConfigurationError(
             f"failed to load CA file ({ca_path}): {exc}"
         ) from exc
+
+    return ctx
+
+
+def build_ssl_context_from_data(
+    cert_pem: bytes,
+    key_pem: bytes,
+    ca_pem: bytes,
+    *,
+    server_side: bool = True,
+) -> ssl.SSLContext:
+    """Construct an SSLContext from inline PEM bytes rather than file paths.
+
+    This function is the companion to build_ssl_context for use with the
+    inline base64 config model, where TLS material is embedded in config.toml
+    rather than stored on disk as separate files.
+
+    The CA certificate is loaded in-memory via load_verify_locations(cadata=).
+    The cert and key require temporary files because the ssl module's
+    load_cert_chain API does not accept in-memory bytes; the temp directory is
+    deleted immediately after the chain is loaded.
+
+    Raise TlsConfigurationError on any SSL or I/O failure. See also
+    build_ssl_context for the file-path variant and for the rationale behind
+    the mTLS settings applied here (TLS 1.3 minimum, CERT_REQUIRED,
+    check_hostname tied to server_side).
+
+    Parameters:
+        cert_pem: PEM-encoded certificate bytes.
+        key_pem: PEM-encoded private key bytes.
+        ca_pem: PEM-encoded CA certificate bytes.
+        server_side: When True (default) build a server context; when False
+            build a client context.
+
+    Returns:
+        A fully configured ssl.SSLContext ready for use with asyncio streams.
+
+    Raises:
+        TlsConfigurationError: If the certificate material is invalid.
+    """
+    protocol = ssl.PROTOCOL_TLS_SERVER if server_side else ssl.PROTOCOL_TLS_CLIENT
+    ctx = ssl.SSLContext(protocol)
+    ctx.minimum_version = MINIMUM_TLS_VERSION
+    ctx.check_hostname = not server_side
+    ctx.verify_mode = ssl.CERT_REQUIRED
+
+    try:
+        ctx.load_verify_locations(cadata=ca_pem.decode())
+    except (ssl.SSLError, OSError, UnicodeDecodeError) as exc:
+        raise TlsConfigurationError(
+            f"failed to load CA data from inline PEM: {exc}"
+        ) from exc
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cert_path = Path(tmpdir) / "cert.pem"
+        key_path = Path(tmpdir) / "key.pem"
+        cert_path.write_bytes(cert_pem)
+        key_path.write_bytes(key_pem)
+        if hasattr(os, "chmod"):
+            # Restrict temporarily written key/cert files to owner-only on POSIX
+            # platforms. Windows does not honor POSIX permission bits so skip.
+            os.chmod(cert_path, 0o600)
+            os.chmod(key_path, 0o600)
+        try:
+            ctx.load_cert_chain(certfile=str(cert_path), keyfile=str(key_path))
+        except (ssl.SSLError, OSError) as exc:
+            raise TlsConfigurationError(
+                f"failed to load cert chain from inline PEM data: {exc}"
+            ) from exc
 
     return ctx

@@ -21,6 +21,7 @@ from tourillon.core.net.tcp.tls import (
     MINIMUM_TLS_VERSION,
     TlsConfigurationError,
     build_ssl_context,
+    build_ssl_context_from_data,
 )
 
 
@@ -126,3 +127,47 @@ def test_build_ssl_context_client_side_check_hostname_true(
 
 def test_minimum_tls_version_is_1_3() -> None:
     assert ssl.TLSVersion.TLSv1_3 == MINIMUM_TLS_VERSION
+
+
+def test_build_ssl_context_from_data_invalid_ca_raises(monkeypatch) -> None:
+    """build_ssl_context_from_data raises TlsConfigurationError on bad CA PEM bytes."""
+    with pytest.raises(TlsConfigurationError, match="CA"):
+        build_ssl_context_from_data(b"cert", b"key", b"not-a-pem")
+
+
+def test_build_ssl_context_from_data_server_side(monkeypatch) -> None:
+    """build_ssl_context_from_data returns a server context with check_hostname=False."""
+
+    def _noop_load_cert_chain(self, certfile, keyfile):
+        return None
+
+    def _noop_load_verify_locations(self, cafile=None, capath=None, cadata=None):
+        return None
+
+    monkeypatch.setattr(ssl.SSLContext, "load_cert_chain", _noop_load_cert_chain)
+    monkeypatch.setattr(
+        ssl.SSLContext, "load_verify_locations", _noop_load_verify_locations
+    )
+
+    ctx = build_ssl_context_from_data(b"cert", b"key", b"ca", server_side=True)
+    assert ctx.check_hostname is False
+    assert ctx.verify_mode == ssl.CERT_REQUIRED
+
+
+def test_build_ssl_context_from_data_client_side(monkeypatch) -> None:
+    """build_ssl_context_from_data returns a client context with check_hostname=True."""
+
+    def _noop_load_cert_chain(self, certfile, keyfile):
+        return None
+
+    def _noop_load_verify_locations(self, cafile=None, capath=None, cadata=None):
+        return None
+
+    monkeypatch.setattr(ssl.SSLContext, "load_cert_chain", _noop_load_cert_chain)
+    monkeypatch.setattr(
+        ssl.SSLContext, "load_verify_locations", _noop_load_verify_locations
+    )
+
+    ctx = build_ssl_context_from_data(b"cert", b"key", b"ca", server_side=False)
+    assert ctx.check_hostname is True
+    assert ctx.verify_mode == ssl.CERT_REQUIRED

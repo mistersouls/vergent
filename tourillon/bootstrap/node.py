@@ -13,12 +13,14 @@
 # limitations under the License.
 """Node assembly factories for the Tourillon bootstrap layer."""
 
+import base64
 from pathlib import Path
 
 from tourillon.bootstrap.handlers import KvHandlers
+from tourillon.core.config import TourillonConfig
 from tourillon.core.dispatch import Dispatcher
 from tourillon.core.net.tcp.server import TcpServer
-from tourillon.core.net.tcp.tls import build_ssl_context
+from tourillon.core.net.tcp.tls import build_ssl_context, build_ssl_context_from_data
 from tourillon.core.ports.storage import LocalStoragePort
 from tourillon.infra.memory.store import MemoryStore
 from tourillon.infra.msgpack.serializer import MsgPackSerializer
@@ -77,5 +79,49 @@ async def create_tcp_node(
     ssl_ctx = build_ssl_context(certfile, keyfile, cafile)
     active_dispatcher = dispatcher if dispatcher is not None else Dispatcher()
     store = MemoryStore(node_id)
+    KvHandlers(store, MsgPackSerializer()).register(active_dispatcher)
+    return TcpServer(host, port, ssl_ctx, active_dispatcher)
+
+
+async def create_tcp_node_from_config(
+    cfg: TourillonConfig,
+    *,
+    dispatcher: Dispatcher | None = None,
+) -> TcpServer:
+    """Assemble and return a TcpServer-backed node from a TourillonConfig.
+
+    Decode inline base64 TLS material from the config, construct the mTLS
+    SSLContext, and wire the KV handlers onto a Dispatcher. The returned
+    TcpServer binds on cfg.servers_kv.bind and is not yet running; callers
+    must await server.start() and later server.stop().
+
+    This factory is the canonical assembly point when the node is started via
+    the CLI config workflow (tourillon node start --config ./node-1.toml).
+    Callers that have pre-built a Dispatcher can supply it via the dispatcher
+    keyword argument.
+
+    Parameters:
+        cfg: Validated runtime configuration with inline base64 TLS material.
+        dispatcher: Optional pre-configured Dispatcher. When None a fresh
+            empty Dispatcher is created.
+
+    Returns:
+        A TcpServer instance bound to cfg.servers_kv, ready to be started.
+    """
+    cert_pem = base64.b64decode(cfg.tls.cert_data)
+    key_pem = base64.b64decode(cfg.tls.key_data)
+    ca_pem = base64.b64decode(cfg.tls.ca_data)
+
+    ssl_ctx = build_ssl_context_from_data(cert_pem, key_pem, ca_pem, server_side=True)
+
+    host, _, port_str = cfg.servers_kv.bind.rpartition(":")
+    if not host:
+        host = cfg.servers_kv.bind
+        port = 7000
+    else:
+        port = int(port_str)
+
+    active_dispatcher = dispatcher if dispatcher is not None else Dispatcher()
+    store = MemoryStore(cfg.node_id)
     KvHandlers(store, MsgPackSerializer()).register(active_dispatcher)
     return TcpServer(host, port, ssl_ctx, active_dispatcher)

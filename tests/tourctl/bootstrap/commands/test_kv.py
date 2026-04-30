@@ -699,7 +699,7 @@ def test_handle_client_error_unexpected_calls_print_error() -> None:
         ) as mock_error,
         pytest.raises(SystemExit),
     ):
-        _handle_client_error(RuntimeError("oops"), "localhost", 7000, 10.0)
+        _handle_client_error(RuntimeError("oops"), 10.0)
     mock_error.assert_called_once()
     assert "oops" in str(mock_error.call_args[0][0])
 

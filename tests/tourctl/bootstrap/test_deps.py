@@ -138,3 +138,89 @@ def test_get_serializer_returns_serializer_after_configure(
 
     s = deps.get_serializer()
     assert s is not None
+
+
+def test_configure_from_active_context_no_file_raises(tmp_path) -> None:
+    """configure_from_active_context raises ConfigError when contexts file is absent."""
+    _reset_deps(deps)
+    from tourillon.core.config import ConfigError
+
+    with pytest.raises(ConfigError, match="No active context"):
+        deps.configure_from_active_context(contexts_file=tmp_path / "absent.toml")
+
+
+def test_configure_from_active_context_no_current_context_raises(
+    tmp_path,
+) -> None:
+    """configure_from_active_context raises ConfigError when current_context is unset."""
+    from tourillon.bootstrap.contexts import (
+        ClusterEntry,
+        ContextCredentials,
+        ContextEndpoints,
+        ContextEntry,
+        ContextsFile,
+    )
+    from tourillon.core.config import ConfigError
+
+    cf = ContextsFile(current_context=None)
+    cf.upsert_context(
+        ContextEntry(
+            name="prod",
+            cluster=ClusterEntry(name="prod", ca_data="Y2E="),
+            endpoints=ContextEndpoints(kv="127.0.0.1:7000"),
+            credentials=ContextCredentials(cert_data="Y2VydA==", key_data="a2V5"),
+        )
+    )
+    path = tmp_path / "contexts.toml"
+    cf.save(path)
+
+    _reset_deps(deps)
+    with pytest.raises(ConfigError, match="No active context"):
+        deps.configure_from_active_context(contexts_file=path)
+
+
+def test_configure_from_active_context_succeeds_with_valid_context(
+    tmp_path, monkeypatch
+) -> None:
+    """configure_from_active_context initialises singletons from a valid context."""
+    import base64
+
+    from tourillon.bootstrap.contexts import (
+        ClusterEntry,
+        ContextCredentials,
+        ContextEndpoints,
+        ContextEntry,
+        ContextsFile,
+    )
+
+    cf = ContextsFile(current_context="prod")
+    cf.upsert_context(
+        ContextEntry(
+            name="prod",
+            cluster=ClusterEntry(name="prod", ca_data=base64.b64encode(b"ca").decode()),
+            endpoints=ContextEndpoints(kv="127.0.0.1:7000"),
+            credentials=ContextCredentials(
+                cert_data=base64.b64encode(b"cert").decode(),
+                key_data=base64.b64encode(b"key").decode(),
+            ),
+        )
+    )
+    path = tmp_path / "contexts.toml"
+    cf.save(path)
+
+    _reset_deps(deps)
+    import ssl
+
+    monkeypatch.setattr(
+        ssl.SSLContext, "load_cert_chain", lambda self, certfile, keyfile: None
+    )
+    monkeypatch.setattr(
+        ssl.SSLContext,
+        "load_verify_locations",
+        lambda self, cafile=None, capath=None, cadata=None: None,
+    )
+
+    entry = deps.configure_from_active_context(contexts_file=path)
+    assert entry.name == "prod"
+    assert deps._host == "127.0.0.1"
+    assert deps._port == 7000

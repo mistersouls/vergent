@@ -107,3 +107,43 @@ async def test_handle_put_sends_err_on_missing_key_field() -> None:
     send.assert_called_once()
     response: Envelope = send.call_args[0][0]
     assert response.kind == KIND_KV_ERR
+
+
+@pytest.mark.asyncio
+async def test_handle_put_uses_injected_now_ms_provider() -> None:
+    """KvHandlers uses the injected now_ms_provider for missing now_ms fields."""
+    store = MemoryStore(node_id="test-node")
+    serializer = MsgPackSerializer()
+    captured: list[int] = []
+
+    def provider() -> int:
+        captured.append(42000)
+        return 42000
+
+    handler = KvHandlers(store, serializer, now_ms_provider=provider)
+    payload = serializer.encode({"keyspace": b"ks", "key": b"prov", "value": b"v"})
+    envelope = Envelope.create(payload, kind="kv.put")
+    send = AsyncMock()
+    await handler.handle_put(envelope, send)
+    assert len(captured) == 1
+    assert captured[0] == 42000
+
+
+@pytest.mark.asyncio
+async def test_handle_delete_uses_injected_now_ms_provider() -> None:
+    """KvHandlers uses the injected now_ms_provider for missing now_ms on delete."""
+    store = MemoryStore(node_id="test-node")
+    serializer = MsgPackSerializer()
+    captured: list[int] = []
+
+    def provider() -> int:
+        captured.append(99000)
+        return 99000
+
+    handler = KvHandlers(store, serializer, now_ms_provider=provider)
+    payload = serializer.encode({"keyspace": b"ks", "key": b"d1"})
+    envelope = Envelope.create(payload, kind="kv.delete")
+    send = AsyncMock()
+    await handler.handle_delete(envelope, send)
+    assert len(captured) == 1
+    assert captured[0] == 99000

@@ -20,16 +20,17 @@ their exit codes and captured stdout.
 
 This layer complements ``test_kv_roundtrip.py`` (which exercises the protocol
 stack in-process) by validating the full user-facing surface: argument parsing,
-TLS context assembly from CLI flags, Rich output rendering, and process exit
-codes. A regression in any of those layers would be caught here but not by the
-protocol-level tests.
+TLS context assembly from the config file, Rich output rendering, and process
+exit codes. A regression in any of those layers would be caught here but not by
+the protocol-level tests.
 
 The fixture is function-scoped. Each test gets an isolated node bound to an
-ephemeral port with a freshly generated certificate bundle, so tests are
-independent and repeatable.
+ephemeral port with a freshly generated certificate bundle and a self-contained
+config.toml, so tests are independent and repeatable.
 """
 
 import asyncio
+import base64
 import socket
 import sys
 from collections.abc import AsyncGenerator
@@ -38,6 +39,7 @@ from typing import NamedTuple
 
 import pytest
 
+from tourillon.bootstrap.config import build_node_toml, write_config_file
 from tourillon.core.ports.pki import CaRequest, CertRequest
 from tourillon.infra.pki.x509 import X509CertificateAuthority
 
@@ -128,10 +130,12 @@ async def cli_node(tmp_path: Path) -> AsyncGenerator[_CliNode]:
     """Start a tourillon node subprocess and yield its connection parameters.
 
     The fixture generates a self-signed CA, a server certificate (SAN IP
-    127.0.0.1), and a client certificate. It then finds a free port, launches
-    ``python -m tourillon node start`` as an asyncio subprocess, and polls the
-    port until the TCP listener is ready. The server process is terminated in
-    the finally block regardless of whether the test passes or fails.
+    127.0.0.1), and a client certificate. It writes a fully self-contained
+    config.toml with inline base64 TLS material, then launches
+    ``python -m tourillon node start --config <path>`` as an asyncio subprocess
+    and polls the port until the TCP listener is ready. The server process is
+    terminated in the finally block regardless of whether the test passes or
+    fails.
 
     Certificate generation is offloaded to a thread via asyncio.to_thread
     because the X509CertificateAuthority methods are synchronous and CPU-bound.
@@ -186,6 +190,22 @@ async def cli_node(tmp_path: Path) -> AsyncGenerator[_CliNode]:
     )
 
     port = _free_port()
+    kv_bind = f"127.0.0.1:{port}"
+
+    # Build a self-contained config.toml with inline base64 TLS material.
+    toml_content = build_node_toml(
+        node_id="cli-e2e",
+        data_dir=str(tmp_path / "data"),
+        log_level="info",
+        cert_data=base64.b64encode(srv_cert.read_bytes()).decode(),
+        key_data=base64.b64encode(srv_key.read_bytes()).decode(),
+        ca_data=base64.b64encode(ca_cert.read_bytes()).decode(),
+        kv_bind=kv_bind,
+        kv_advertise=kv_bind,
+    )
+    config_path = tmp_path / "node.toml"
+    write_config_file(config_path, toml_content)
+
     srv_proc = await asyncio.create_subprocess_exec(
         sys.executable,
         "-X",
@@ -194,18 +214,8 @@ async def cli_node(tmp_path: Path) -> AsyncGenerator[_CliNode]:
         "tourillon",
         "node",
         "start",
-        "--node-id",
-        "cli-e2e",
-        "--host",
-        "127.0.0.1",
-        "--port",
-        str(port),
-        "--certfile",
-        str(srv_cert),
-        "--keyfile",
-        str(srv_key),
-        "--cafile",
-        str(ca_cert),
+        "--config",
+        str(config_path),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
