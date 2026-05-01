@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from tourillon.bootstrap.handlers import (
+from tourillon.core.handlers.kv import (
     KIND_KV_DELETE_OK,
     KIND_KV_ERR,
     KIND_KV_GET_OK,

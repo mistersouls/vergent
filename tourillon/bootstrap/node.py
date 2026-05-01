@@ -16,9 +16,9 @@
 import base64
 from pathlib import Path
 
-from tourillon.bootstrap.handlers import KvHandlers
 from tourillon.core.config import TourillonConfig
 from tourillon.core.dispatch import Dispatcher
+from tourillon.core.handlers.kv import KvHandlers
 from tourillon.core.net.tcp.server import TcpServer
 from tourillon.core.net.tcp.tls import build_ssl_context, build_ssl_context_from_data
 from tourillon.core.ports.storage import LocalStoragePort

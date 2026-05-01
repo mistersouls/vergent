@@ -19,7 +19,7 @@ from typer.testing import CliRunner
 
 from tourctl.bootstrap.commands import kv
 from tourctl.core.client import NodeUnreachableError, RequestTimeoutError, ServerError
-from tourillon.bootstrap.handlers import KIND_KV_DELETE, KIND_KV_GET, KIND_KV_PUT
+from tourillon.core.handlers.kv import KIND_KV_DELETE, KIND_KV_GET, KIND_KV_PUT
 from tourillon.core.net.tcp.tls import TlsConfigurationError
 from tourillon.core.structure.envelope import Envelope
 

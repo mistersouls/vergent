@@ -33,12 +33,12 @@ from typing import NamedTuple
 import pytest
 
 from tourctl.core.client import TcpClient
-from tourillon.bootstrap.handlers import (
+from tourillon.bootstrap.node import create_tcp_node
+from tourillon.core.handlers.kv import (
     KIND_KV_DELETE_OK,
     KIND_KV_GET_OK,
     KIND_KV_PUT_OK,
 )
-from tourillon.bootstrap.node import create_tcp_node
 from tourillon.core.net.tcp.server import TcpServer
 from tourillon.core.net.tcp.tls import build_ssl_context
 from tourillon.core.ports.pki import CaRequest, CertRequest

@@ -23,7 +23,7 @@ from tourctl.core.client import (
     ServerError,
     TcpClient,
 )
-from tourillon.bootstrap.handlers import KIND_KV_ERR
+from tourillon.core.handlers.kv import KIND_KV_ERR
 from tourillon.core.structure.envelope import Envelope
 
 

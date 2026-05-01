@@ -40,12 +40,12 @@ import typer
 
 from tourctl.bootstrap import deps
 from tourctl.core.client import NodeUnreachableError, RequestTimeoutError, ServerError
-from tourillon.bootstrap.handlers import (
+from tourillon.core.config import ConfigError
+from tourillon.core.handlers.kv import (
     KIND_KV_DELETE,
     KIND_KV_GET,
     KIND_KV_PUT,
 )
-from tourillon.core.config import ConfigError
 from tourillon.core.net.tcp.tls import TlsConfigurationError
 from tourillon.core.structure.envelope import Envelope
 from tourillon.infra.cli.output import (

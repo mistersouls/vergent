@@ -36,7 +36,7 @@ import asyncio
 import logging
 import ssl
 
-from tourillon.bootstrap.handlers import KIND_KV_ERR
+from tourillon.core.handlers.kv import KIND_KV_ERR
 from tourillon.core.net.tcp.connection import Connection
 from tourillon.core.ports.serializer import SerializerPort
 from tourillon.core.structure.envelope import Envelope
