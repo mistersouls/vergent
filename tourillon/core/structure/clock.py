@@ -14,6 +14,7 @@
 """Hybrid Logical Clock timestamp and stateful clock."""
 
 from dataclasses import dataclass
+from typing import Self
 
 
 @dataclass(frozen=True, order=True)
@@ -76,6 +77,30 @@ class HLCTimestamp:
         else:
             new_counter = 0
         return HLCTimestamp(wall=new_wall, counter=new_counter, node_id=self.node_id)
+
+    def to_dict(self) -> dict[str, int | str]:
+        """Serialise this timestamp into a plain dict suitable for wire encoding.
+
+        The returned dict carries three keys — wall, counter, node_id — that are
+        sufficient to reconstruct an identical HLCTimestamp via from_dict. The
+        representation is binary-transparent when encoded with msgpack, and
+        round-trips losslessly through any format that preserves int and str.
+        """
+        return {"wall": self.wall, "counter": self.counter, "node_id": self.node_id}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, int | str]) -> Self:
+        """Reconstruct an HLCTimestamp from its dict representation.
+
+        The dict must carry integer wall and counter values and a string node_id,
+        as produced by to_dict. Passing a dict with missing or wrongly typed keys
+        raises KeyError or ValueError at the point of the failing conversion.
+        """
+        return cls(
+            wall=int(data["wall"]),
+            counter=int(data["counter"]),
+            node_id=str(data["node_id"]),
+        )
 
 
 class HLCClock:

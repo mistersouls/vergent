@@ -15,7 +15,7 @@
 
 import struct
 from dataclasses import dataclass
-from typing import Self
+from typing import Self, cast
 
 from tourillon.core.structure.clock import HLCTimestamp
 
@@ -105,6 +105,26 @@ class StoreKey:
         key = data[_STOREKEY_HDR_SIZE + ks_len : total]
         return cls(keyspace=keyspace, key=key)
 
+    def to_dict(self) -> dict[str, bytes]:
+        """Serialise this key into a binary-transparent dict for wire encoding.
+
+        The returned dict carries the raw bytes of keyspace and key without any
+        re-encoding, so that binary-transparent serialisers such as msgpack can
+        round-trip the fields losslessly. Callers that need a text-safe format
+        are responsible for hex-encoding the fields before further processing.
+        """
+        return {"keyspace": self.keyspace, "key": self.key}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, bytes]) -> Self:
+        """Reconstruct a StoreKey from its dict representation.
+
+        The dict must carry bytes values for both keyspace and key, as produced
+        by to_dict. Passing string or other non-bytes values raises TypeError
+        inside the dataclass __post_init__ validation.
+        """
+        return cls(keyspace=data["keyspace"], key=data["key"])
+
 
 @dataclass(frozen=True)
 class Version:
@@ -125,6 +145,33 @@ class Version:
     metadata: HLCTimestamp
     value: bytes
 
+    def to_dict(self) -> dict[str, object]:
+        """Serialise this version into a kind-discriminated dict for wire encoding.
+
+        The kind field is always "version", distinguishing this dict from the
+        output of Tombstone.to_dict when both are stored in a heterogeneous
+        collection. Nested address and metadata fields are serialised by
+        delegating to their own to_dict methods.
+        """
+        return {
+            "kind": "version",
+            "address": self.address.to_dict(),
+            "metadata": self.metadata.to_dict(),
+            "value": self.value,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, object]) -> Self:
+        """Reconstruct a Version from its kind-discriminated dict.
+
+        The dict must have been produced by to_dict or an equivalent encoder.
+        Nested address and metadata are reconstructed by delegating to their
+        own from_dict class methods.
+        """
+        address = StoreKey.from_dict(cast(dict[str, bytes], data["address"]))
+        metadata = HLCTimestamp.from_dict(cast(dict[str, int | str], data["metadata"]))
+        return cls(address=address, metadata=metadata, value=cast(bytes, data["value"]))
+
 
 @dataclass(frozen=True)
 class Tombstone:
@@ -141,3 +188,38 @@ class Tombstone:
 
     address: StoreKey
     metadata: HLCTimestamp
+
+    def to_dict(self) -> dict[str, object]:
+        """Serialise this tombstone into a kind-discriminated dict for wire encoding.
+
+        The kind field is always "tombstone", distinguishing this dict from
+        the output of Version.to_dict. There is no value field.
+        """
+        return {
+            "kind": "tombstone",
+            "address": self.address.to_dict(),
+            "metadata": self.metadata.to_dict(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, object]) -> Self:
+        """Reconstruct a Tombstone from its kind-discriminated dict."""
+        address = StoreKey.from_dict(cast(dict[str, bytes], data["address"]))
+        metadata = HLCTimestamp.from_dict(cast(dict[str, int | str], data["metadata"]))
+        return cls(address=address, metadata=metadata)
+
+
+def record_from_dict(data: dict[str, object]) -> Version | Tombstone:
+    """Reconstruct a Version or Tombstone from its kind-discriminated dict.
+
+    The kind field produced by Version.to_dict or Tombstone.to_dict determines
+    which concrete type is instantiated. Raises ValueError when the kind is
+    unrecognised. This free function is the single dispatch point for callers
+    that hold a heterogeneous list of record dicts, such as TransferBatch.from_dict.
+    """
+    kind = str(data["kind"])
+    if kind == "version":
+        return Version.from_dict(data)
+    if kind == "tombstone":
+        return Tombstone.from_dict(data)
+    raise ValueError(f"unknown record kind: {kind!r}")

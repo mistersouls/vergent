@@ -152,28 +152,90 @@ Exit criteria:
 Goal: move partition data safely across ring members when topology changes
 (scale-out, scale-in, or ring epoch change).
 
-Deliverables:
-- `rebalance.plan` flow: source node emits the list of partitions and keys to
-  transfer given the new ring epoch.
-- `rebalance.transfer` flow: streaming bulk transfer of key/version/tombstone
-  data between nodes with rate-limiting to avoid saturating the network.
-- `rebalance.commit` flow: target node confirms integrity before the source
-  drops ownership; commit is withheld if integrity validation fails.
-- Progress observability: partitions queued, partitions in flight, bytes
-  transferred, estimated lag exposed through a structured log event per
-  transfer batch.
-- Rate-limiting configurable per node to allow rebalance to coexist with
-  foreground traffic.
+The normative design, full deliverable breakdown, and exit criteria for
+partition rebalance are defined in **Milestone 3 — Rebalance** (see below).
+Phase 2c depends on the ring-epoch plumbing from Phase 2a and the replication
+transport from Phase 2b being fully in place; Milestone 3 is sequenced
+immediately after Phase 2b is complete.
 
-Exit criteria:
-- Adding or removing a node triggers a rebalance that moves only the affected
-  partitions (no unnecessary data shuffling).
-- Rebalance completes without read/write unavailability on non-migrating
-  partitions.
-- A transfer that fails integrity validation does not result in a committed
-  ownership change.
+## Milestone 3: Rebalance
 
-## Milestone 3: Operations and Hardening
+Goal: implement the full partition rebalance subsystem as specified in
+`docs/rebalance.md`, enabling safe, deterministic, and observable ownership
+migration across ring members under continuous churn, gossip lag, and crash
+scenarios, without violating convergence or availability guarantees.
+
+### Deliverables
+
+- `tourillon/core/ports/rebalance.py` — `RebalancePort` Protocol; types
+  `RebalancePlan`, `TransferBatch`, `RebalanceCommit`, `IntegrityDigest`;
+  `RebalanceError` taxonomy covering at minimum `EPOCH_UNKNOWN`,
+  `EPOCH_SUPERSEDED`, `INTEGRITY_FAILURE`, `PEER_NOT_IN_RING`, and
+  `CONFLICT_OR_ORDERING_ERROR`.
+- `tourillon/core/structure/rebalance/plan.py` — `derive_plan(e_old, e_new,
+  ring) -> RebalancePlan` pure function: deterministic, stateless, no
+  wall-clock time, no random tiebreaks; supports optional folding of adjacent
+  epoch transitions into a single composed plan.
+- `tourillon/core/structure/rebalance/coordinator.py` — async rebalance
+  coordinator using `asyncio.TaskGroup` for structured concurrency,
+  `asyncio.Semaphore` to bound concurrent in-flight transfers per node, and
+  `asyncio.Event` for end-to-end backpressure signalling; handles plan
+  supersession by a newer epoch, crash-recovery checkpoints, and the full
+  drain lifecycle.
+- `tourillon/core/handlers/rebalance.py` — handler dispatchers for the three
+  envelope kinds (`rebalance.plan`, `rebalance.transfer`, `rebalance.commit`);
+  validates epoch context on receipt, applies transferred records through the
+  standard idempotent append-only path, and enforces the dual-ownership write
+  fan-out and read merge rules.
+- Extensions to `LocalStoragePort` for quarantine staging (accept in-progress
+  transfer batches without making them visible to reads) and atomic promote
+  (commit a fully validated quarantined partition to the live read path in a
+  single atomic operation); the in-memory storage adapter updated to implement
+  both extensions.
+- Durable rebalance log recording, keyed by `(partition, E_new)`: plan
+  acceptance on both source and target sides, per-batch transfer progress (last
+  HLC applied at the target), commit issuance (target), and commit
+  acknowledgement (source); replay of any log entry MUST be idempotent.
+- Structured observability: log events for plan derivation
+  `(E_old, E_new, partitions, source, target)`, transfer batches
+  `(partition, batch_id, records, bytes, last_hlc)`, commit decisions
+  `(partition, target, decision, integrity_digest)`, and aborts/retries with
+  explicit reason codes; metrics for partitions queued, in-flight, completed,
+  and failed; bytes and records transferred per source and per target;
+  time-to-commit p50/p95/p99; plans aborted due to epoch supersession; hinted
+  handoff backlog created or drained as a side effect — all as specified in
+  `docs/rebalance.md`; events and metrics surfaced through `tourctl ring
+  inspect` and structured-log paths.
+- Operator-plane wiring: ring-epoch change events trigger plan derivation in
+  the coordinator; `tourctl/` extended with rebalance status sub-commands;
+  rate-limit fraction and semaphore concurrency bound exposed as configurable
+  parameters in `TourillonConfig`.
+
+### Exit Criteria
+
+- The deterministic plan derivation is implemented behind a `RingPort` contract
+  and produces identical output on every node for the same epoch pair.
+- `rebalance.plan`, `rebalance.transfer`, and `rebalance.commit` are fully
+  implemented with integrity validation and idempotent replay.
+- The dual-ownership window preserves availability and quorum semantics across
+  handover, validated by automated tests.
+- Crash, partition, and storm scenarios listed under *Worst-Case Scenarios* in
+  `docs/rebalance.md` are covered by automated fault-injection tests and pass
+  reliably.
+- Observability events and metrics listed in `docs/rebalance.md` are emitted
+  and consumable via `tourctl ring inspect` and structured-log paths.
+- All rebalance traffic is verified to traverse mTLS exclusively, with
+  certificate identity tied to ring membership.
+- `uv run pytest --cov-fail-under=90` passes.
+- `uv run pre-commit run --all-files` passes.
+- Property-based tests (Hypothesis) assert that for any sequence of topology
+  events applied in any order, the final ownership map and per-key HLC
+  histories on every surviving replica are identical.
+- A negative mTLS test verifies that a transfer peer whose certificate identity
+  is not present in the current ring epoch is rejected at the transport layer
+  before any rebalance payload is processed.
+
+## Milestone 4: Operations and Hardening
 
 Goal: production-readiness baseline covering certificate lifecycle automation,
 operator tooling, observability, and validated operational procedures.
@@ -207,7 +269,7 @@ Exit criteria:
   environment without data loss.
 - Backup followed by full restore passes data integrity checks.
 
-## Milestone 4: Scale Validation
+## Milestone 5: Scale Validation
 
 Goal: validate large-cluster behavior, identify scalability limits, and publish
 reliability thresholds.
