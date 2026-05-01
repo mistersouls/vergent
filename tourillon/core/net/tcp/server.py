@@ -169,6 +169,11 @@ class TcpServer:
         Constructs the Connection framing layer, invokes the ConnectionHandler,
         and ensures the writer is always closed regardless of how the handler
         exits. TransportError is logged at WARNING; other exceptions at ERROR.
+
+        mTLS authentication is enforced entirely by the ssl_ctx passed at
+        construction time (verify_mode=CERT_REQUIRED). Unauthenticated peers
+        are rejected by the TLS handshake before this method is ever called;
+        no application-layer certificate check is required here.
         """
         conn = Connection(reader, writer, max_frame_bytes=self._max_frame_bytes)
         peer = conn.peer_address

@@ -428,9 +428,9 @@ on every surviving replica are identical.
 
 ## Done Criteria
 
-- The deterministic plan derivation is implemented behind a `RingPort`
-  contract and produces identical output on every node for the same epoch
-  pair.
+- The deterministic plan derivation is a pure function of
+  `(epoch_old, epoch_new, ring_old, ring_new)` and produces identical output
+  on every node for the same inputs.
 - `rebalance.plan`, `rebalance.transfer`, and `rebalance.commit` are
   fully implemented with integrity validation and idempotent replay.
 - The dual-ownership window preserves availability and quorum semantics

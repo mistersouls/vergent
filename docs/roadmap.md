@@ -103,24 +103,73 @@ Goal: establish a shared, self-consistent view of cluster topology so that every
 node can independently compute partition ownership without a coordinator.
 
 Deliverables:
-- `RingPort` Protocol defined in `core/ports/ring.py`, decoupling ring logic from
-  transport and storage layers.
-- Consistent-hash ring implementing `StoreKey → token → partition → replica set`
-  resolution.
-- Replication factor N exposed as a configurable parameter (default 3).
-- Gossip-based membership dissemination covering join, graceful leave, and
-  failure detection (heartbeat + suspicion model).
-- Deterministic partition ownership per ring version so that any two nodes
-  compute identical replica sets for a given key at a given ring epoch.
-- Ring state versioned with a monotonic epoch; stale views are rejected on receipt.
+- Ring subsystem in `tourillon/core/ring/`:
+  - `HashSpace(bits: int = 128)` — configurable-width circular hash space.
+    `bits=128` in production; smaller values (e.g. `bits=8`) for tests. Hash
+    function is MD5 output truncated to `bits`. All arithmetic is modulo
+    `2**bits`. Token generation is handled by the node bootstrap layer.
+  - `VNode(node_id: str, token: int)` — atomic unit of ring position.
+    A physical node owns multiple vnodes; `token` is an `int` in `[0, 2**bits)`.
+  - `Ring` — immutable sorted sequence of vnodes; O(log n) successor lookup
+    via `bisect_right` on token values; `add_vnodes` and `drop_nodes` return
+    new `Ring` instances; `iter_from` for clockwise ring walks.
+  - `Partitioner(partition_shift: int)` — maps tokens to `LogicalPartition`
+    instances via `pid = h >> (bits - partition_shift)`; validates
+    `partition_shift < bits` at construction. Exposes
+    `placement_for_token(token, ring) → PartitionPlacement` as the primary
+    routing entry point, combining partition lookup and ring successor resolution
+    into a single step; `pid_for_hash` and `segment_for_pid` remain available as
+    lower-level helpers. `partition_shift=17` (131 072 partitions) is the
+    recommended floor for clusters expected to grow to 10 000 nodes; see
+    `docs/ring.md` §4.2 for the full sizing table.
+  - `LogicalPartition(pid, start, end)` — immutable hash-space segment
+    covering the half-open interval `(start, end]`.
+  - `PartitionPlacement(partition, vnode)` — ephemeral binding of a logical
+    partition to its current ring owner; produced by
+    `Partitioner.placement_for_token`; `address` property returns the stable
+    storage key prefix for the partition; recomputed after every ring mutation,
+    never persisted.
+  - `PlacementStrategy` Protocol — single method
+    `preference_list(placement, ring) -> list[str]`; must be a pure
+    function of its arguments. `SimplePreferenceStrategy` is the default
+    implementation: distinct-node clockwise ring walk, `READY` and `DRAINING`
+    nodes are eligible, `IDLE` and `JOINING` are excluded. Future
+    implementations may enforce topology-label anti-affinity without changing
+    any call site.
+- Replication factor `rf` exposed as a configurable cluster-wide parameter
+  (default 3), validated at startup before any partition assignment takes place.
+- `MemberPhase` enum (`IDLE`, `JOINING`, `READY`, `DRAINING`) in
+  `core/structure/membership.py` representing each node's self-declared
+  operational state. Phase transitions occur only when operations complete;
+  restarts resume the persisted phase. `DRAINING` is irreversible for now.
+- `Member` value object carrying `node_id`, `peer_address`, `generation`,
+  `seq`, and `phase`. No wall-clock timestamps; no local-only fields.
+  Local reachability observations (SUSPECT / DEAD) are never transmitted.
+- Gossip-based membership dissemination: each node propagates its own
+  `MemberPhase` transitions (JOINING, READY, DRAINING) to peers. Local
+  reachability state (SUSPECT / DEAD) is determined independently by each node
+  from operation failures and is never propagated.
+- Deterministic partition ownership per ring epoch: any two nodes holding the
+  same epoch produce identical `preference_list` outputs for a given key.
+- Ring state versioned with a monotonic epoch; envelopes carrying a stale epoch
+  are rejected on receipt.
+- `docs/ring.md` as the normative specification for the hash space, virtual-node
+  ring, partitioner, logical partitions, placement strategy, and ring epoch
+  model.
+- `docs/membership.md` documenting both FSMs, the local-only failure detection
+  invariant, phase persistence, restart behaviour, and the relationship between
+  phase transitions and ring epochs.
 
 Exit criteria:
 - Two or more nodes converge to the same ring view within a bounded time after
   a join or leave event.
-- Ownership queries for any `StoreKey` return the same replica set on all nodes
-  holding the current ring epoch.
+- `preference_list` for any `StoreKey` returns the same ordered node sequence
+  on all nodes holding the current ring epoch.
 - Failure detection marks an unresponsive node as suspect within a configurable
   timeout.
+- A test instance using `bits=8` and `partition_shift=4` converges to the same
+  ownership map as an equivalent `bits=128` instance for all applicable
+  determinism tests.
 
 ### Phase 2b — Replication and Hinted Handoff
 
@@ -213,8 +262,10 @@ scenarios, without violating convergence or availability guarantees.
 
 ### Exit Criteria
 
-- The deterministic plan derivation is implemented behind a `RingPort` contract
-  and produces identical output on every node for the same epoch pair.
+- The deterministic plan derivation is a pure function of
+  `(epoch_old, epoch_new, ring_old, ring_new)` and produces identical output
+  on every node for the same inputs, with no wall-clock time or random
+  tiebreaks.
 - `rebalance.plan`, `rebalance.transfer`, and `rebalance.commit` are fully
   implemented with integrity validation and idempotent replay.
 - The dual-ownership window preserves availability and quorum semantics across

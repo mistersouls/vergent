@@ -267,15 +267,113 @@ The server component wraps `asyncio.start_server` with an SSL context that enfor
 mutual TLS. There is no cleartext fallback. Connections that fail certificate
 validation are closed immediately without returning any application-level error.
 
+## Membership Model
+
+Tourillon maintains cluster membership through two orthogonal FSMs that live on
+every node. Neither FSM requires a central coordinator.
+
+### MemberPhase — self-declared operational state
+
+`MemberPhase` is what a node declares about its own operational readiness. It is
+propagated to peers via gossip and persisted locally so that a restarted node
+resumes the phase it held before the crash without waiting for an operator
+command.
+
+```
+IDLE ──[join cmd]──► JOINING ──[bootstrap done]──► READY ──[leave cmd]──► DRAINING
+ ▲                                                                              │
+ └──────────────────────────────[drain done]─────────────────────────────────────┘
+```
+
+- **IDLE** — process is running, holds no partition responsibility, and has not
+  been commanded to join. This is the initial state on first startup and the
+  state the node returns to after a successful drain.
+- **JOINING** — an explicit `join` command was issued; the node is bootstrapping
+  (contacting seeds, receiving the current `RingView`, loading its assigned
+  partitions). The node re-enters this phase automatically on restart if its
+  persisted phase was `JOINING`.
+- **READY** — fully operational; the node accepts reads, writes, and replication
+  traffic for its assigned partitions. On restart from a persisted `READY` phase
+  the node resumes `READY` immediately and re-announces itself to seeds.
+- **DRAINING** — an explicit `leave` command was issued; the node is transferring
+  its partitions to other replicas and refuses new writes for those partitions.
+  On restart the drain resumes from where it stopped. `DRAINING` is
+  irreversible: there is no cancel.  When all partition transfers finish the node
+  broadcasts a leave notice and returns to `IDLE`.
+
+Phase transitions happen **only when operations complete**, never solely because
+the process restarted.
+
+### Local failure detection — operation-driven, never global
+
+Tourillon does not maintain a separate heartbeat loop to detect failures. A peer
+is considered suspect when a local operation directed at it fails (write,
+replicate, probe). The suspicion is a **local observation** on the node that
+experienced the failure. Two nodes may simultaneously hold different views of
+the same peer's reachability — this is normal and expected.
+
+The local reachability state (`REACHABLE / SUSPECT / DEAD`) is maintained
+internally by the gossip engine and is **never propagated** to other nodes.
+Propagating it would conflate a local observation with a global decision and
+would violate the leaderless invariant.
+
+`MemberPhase` alone travels on the wire. Remote nodes learn that a peer has
+departed only when that peer broadcasts its own phase transition (DRAINING,
+then the final leave notice). Crashes are detected locally by each observer
+independently, through operation failures.
+
 ## Data Partitioning and Replication Ring
 
-- The cluster MUST map keys to partitions through a consistent-hashing ring.
-- Each partition MUST define a deterministic replica set ordering.
-- Replication factor `N` MUST be configurable and validated at startup.
-- Ring transitions (join/leave/failure) MUST preserve deterministic ownership calculations for a given ring version.
-- Any ownership change MUST produce a deterministic rebalance plan for affected partitions.
+The normative specification for the ring subsystem is `docs/ring.md`. This
+section summarises the layered model and the invariants that the rest of the
+architecture depends on.
 
-Rationale: deterministic ownership prevents split-brain interpretation of who is responsible for each key.
+Tourillon maps every `StoreKey` to a deterministic, ordered set of replica
+nodes through three independent abstractions:
+
+**Hash space.** A configurable-width circular integer domain `[0, 2**bits)`
+into which keys and node identifiers are projected via a deterministic hash
+function. The production value is `bits=128`; smaller values (e.g. `bits=8`)
+are used in tests to reduce the combinatorial search space while preserving
+all structural ring properties. All position arithmetic is modular; interval
+membership uses the half-open convention `(a, b]`.
+
+**Virtual-node ring.** Each physical node is assigned multiple virtual nodes
+virtual nodes (vnodes), each identified by `(str, Token)` where `Token ∈ [0, 2**bits)`.
+The ring is an immutable sorted sequence of vnodes. The successor of any
+token is found in O(log n) via `bisect_right`. All ring mutations return a
+new ring instance; no in-place modification is ever performed. A larger vnode
+count per physical node distributes load more evenly and reduces the data
+volume moved per topology event. For a cluster planned to scale to 10 000
+nodes, `partition_shift=17` (131 072 logical partitions) and an appropriate
+vnode count per node must be set at bootstrap and cannot be changed without
+a full data migration.
+
+**Logical partition grid.** The hash space is divided into `2**partition_shift`
+equal, static partitions. These partitions are independent of vnodes: the
+same `PartitionId` always covers the same segment of the hash space regardless
+of how the ring topology changes. A `LogicalPartition(pid, start, end)` is
+the unit of ownership in the ring view and the unit of transfer in the rebalance
+protocol. `PartitionPlacement(partition, vnode)` ties a `LogicalPartition` to its
+current ring owner; `PartitionPlacement.address` is the stable storage key prefix
+used to group records belonging to the same partition.
+
+**Preference list.** `Partitioner.placement_for_token(token, ring)` resolves a
+token directly to a `PartitionPlacement` — the ephemeral binding of a
+`LogicalPartition` to its current ring owner. Starting from `placement.vnode`,
+the placement strategy walks the ring clockwise, collecting distinct physical
+node identifier strings until `rf` eligible nodes have been found. Eligibility is
+determined by `MemberPhase`: `READY` and `DRAINING` nodes are included; `IDLE`
+and `JOINING` nodes are excluded. The preference list is a pure function of
+`(placement, ring)` and produces an identical result on every node for the same
+inputs. `PlacementStrategy` is a Protocol, allowing future implementations to add
+topology-label-based anti-affinity without changing any call site.
+
+The replication factor `rf` is a configurable cluster-wide parameter,
+defaulting to 3, validated at startup before any partition assignment takes
+place. Deterministic ownership — the guarantee that any two nodes compute
+identical replica sets for a given key at a given ring epoch — is the
+foundation that prevents split-brain interpretation of data responsibility.
 
 ## Rebalance Model
 
