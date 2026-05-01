@@ -113,3 +113,40 @@ class LocalStoragePort(Protocol):
         follows all earlier writes.
         """
         ...
+
+
+class ReplicaStoragePort(Protocol):
+    """Driven port through which a replica applies a pre-stamped write or delete.
+
+    ReplicaStoragePort is intentionally separate from LocalStoragePort. While
+    LocalStoragePort is the write path for client-originating operations — where
+    the local HLC clock advances and a fresh timestamp is assigned —
+    ReplicaStoragePort is the write path for coordinator-originating operations
+    where the HLC timestamp has already been assigned by the coordinator and must
+    be preserved verbatim so that every replica converges to the same LWW outcome.
+
+    Implementations must:
+    - Store the supplied Version or Tombstone using its own metadata field as the
+      canonical ordering key, without generating a new timestamp.
+    - Advance the local HLC clock to at least the received timestamp so that
+      subsequent locally-originating events causally follow the replicated event.
+    - Be idempotent: applying the same (address, metadata) pair twice must
+      produce the same visible state as applying it once.
+    """
+
+    async def apply_version(self, version: Version) -> None:
+        """Persist a pre-stamped Version received from a coordinator.
+
+        The version's metadata field is used as-is for LWW resolution. The
+        local HLC clock must be advanced to observe the remote timestamp so
+        that events issued after this call are causally ordered after it.
+        """
+        ...
+
+    async def apply_tombstone(self, tombstone: Tombstone) -> None:
+        """Persist a pre-stamped Tombstone received from a coordinator.
+
+        The same constraints as apply_version apply: no re-stamping,
+        idempotent, and the local HLC must be advanced.
+        """
+        ...

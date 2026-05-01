@@ -14,6 +14,7 @@
 """Tests for tourillon.infra.memory.store — MemoryStore deterministic versioned state."""
 
 from tourillon.core.ports.storage import DeleteOp, ReadOp, WriteOp
+from tourillon.core.structure.clock import HLCTimestamp
 from tourillon.core.structure.version import StoreKey, Tombstone, Version
 from tourillon.infra.memory.store import MemoryStore
 
@@ -157,3 +158,86 @@ async def test_memorystore_delete_twice_keeps_address_invisible() -> None:
     await store.put(WriteOp(address=addr, value=b"revived", now_ms=3))
     await store.delete(DeleteOp(address=addr, now_ms=4))
     assert await store.get(ReadOp(address=addr)) == []
+
+
+async def test_apply_version_stores_value_retrievable_by_get() -> None:
+    store = MemoryStore("n1")
+    version = Version(
+        address=StoreKey(keyspace=b"ks", key=b"k"),
+        metadata=HLCTimestamp(wall=5000, counter=0, node_id="remote"),
+        value=b"rep-val",
+    )
+    await store.apply_version(version)
+    result = await store.get(ReadOp(address=version.address))
+    assert len(result) == 1
+    assert result[0].value == b"rep-val"
+
+
+async def test_apply_tombstone_marks_address_deleted() -> None:
+    store = MemoryStore("n1")
+    addr = StoreKey(keyspace=b"ks", key=b"kdel")
+    await store.put(WriteOp(address=addr, value=b"v", now_ms=1))
+    tomb = Tombstone(
+        address=addr, metadata=HLCTimestamp(wall=9999, counter=0, node_id="remote")
+    )
+    await store.apply_tombstone(tomb)
+    assert await store.get(ReadOp(address=addr)) == []
+
+
+async def test_apply_version_advances_hlc_clock() -> None:
+    store = MemoryStore("n1")
+    version = Version(
+        address=StoreKey(keyspace=b"ks", key=b"kclk"),
+        metadata=HLCTimestamp(wall=99999, counter=0, node_id="remote"),
+        value=b"v",
+    )
+    await store.apply_version(version)
+    # subsequent local put with now_ms=0 must produce a wall >= 99999
+    v = await store.put(WriteOp(address=version.address, value=b"later", now_ms=0))
+    assert v.metadata.wall >= 99999
+
+
+async def test_apply_version_idempotent_second_application() -> None:
+    store = MemoryStore("n1")
+    version = Version(
+        address=StoreKey(keyspace=b"ks", key=b"kidemp"),
+        metadata=HLCTimestamp(wall=6000, counter=0, node_id="remote"),
+        value=b"val",
+    )
+    await store.apply_version(version)
+    await store.apply_version(version)
+    result = await store.get(ReadOp(address=version.address))
+    assert len(result) == 1
+    assert result[0].value == b"val"
+
+
+async def test_apply_version_lww_remote_beats_local() -> None:
+    store = MemoryStore("n1")
+    addr = StoreKey(keyspace=b"ks", key=b"kcmp")
+    # local put at ts 100
+    await store.put(WriteOp(address=addr, value=b"local", now_ms=100))
+    # remote version with higher wall should win
+    remote = Version(
+        address=addr,
+        metadata=HLCTimestamp(wall=200, counter=0, node_id="remote"),
+        value=b"remote",
+    )
+    await store.apply_version(remote)
+    result = await store.get(ReadOp(address=addr))
+    assert result[0].value == b"remote"
+
+
+async def test_apply_version_lww_local_beats_remote() -> None:
+    store = MemoryStore("n1")
+    addr = StoreKey(keyspace=b"ks", key=b"kcmp2")
+    # local put at ts 500
+    await store.put(WriteOp(address=addr, value=b"local", now_ms=500))
+    # remote version with lower wall should not override
+    remote = Version(
+        address=addr,
+        metadata=HLCTimestamp(wall=200, counter=0, node_id="remote"),
+        value=b"remote",
+    )
+    await store.apply_version(remote)
+    result = await store.get(ReadOp(address=addr))
+    assert result[0].value == b"local"

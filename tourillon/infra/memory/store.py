@@ -13,6 +13,8 @@
 # limitations under the License.
 """In-memory implementation of LocalStoragePort."""
 
+import time
+
 from tourillon.core.ports.storage import DeleteOp, ReadOp, WriteOp
 from tourillon.core.structure.clock import HLCClock
 from tourillon.core.structure.version import Tombstone, Version
@@ -85,3 +87,13 @@ class MemoryStore:
         tombstone = Tombstone(address=op.address, metadata=ts)
         await self._log.append(tombstone)
         return tombstone
+
+    async def apply_version(self, version: Version) -> None:
+        """Persist a pre-stamped Version and advance the local HLC."""
+        self._clock.update(version.metadata, int(time.monotonic() * 1000))
+        await self._log.append(version)
+
+    async def apply_tombstone(self, tombstone: Tombstone) -> None:
+        """Persist a pre-stamped Tombstone and advance the local HLC."""
+        self._clock.update(tombstone.metadata, int(time.monotonic() * 1000))
+        await self._log.append(tombstone)
