@@ -118,6 +118,9 @@ When generating or modifying implementation code, respect these invariants:
 | mTLS | All inter-node and client-node sockets must enforce mutual TLS. Never allow plaintext fallback. |
 | Idempotent replay | Local log entries must be replayable without side-effects. |
 | Hinted handoff ordering | Hints must carry the original ordering metadata of the deferred write. |
+| Phase guard | Any code path that serves reads or writes must guard on `phase == READY`. Code that serves secondary replication or read fan-out during drain must guard on `phase in (READY, DRAINING)`. |
+| Phase persistence before gossip | The updated `MemberPhase` must be written to durable state before the corresponding gossip record is emitted. Never reverse this order. |
+| Generation increment rule | `Member.generation` is incremented exactly once per `IDLE → JOINING` transition. It must not be incremented on any other restart, reconnect, or gossip emission. |
 
 ---
 
@@ -166,6 +169,13 @@ environment at hook runtime.
 - Cover both the happy path and explicit failure/edge cases.
 - Do not use `unittest.TestCase`; use plain functions and `pytest.raises` /
   `pytest.mark`.
+- Tests that exercise distributed behaviour must use in-memory adapters for
+  storage and transport. Real sockets are used only in integration-tier tests
+  under `tests/e2e/`.
+- Each lifecycle phase has a required set of test scenarios defined in
+  `docs/testing.md`. Tests for a phase should be marked with the corresponding
+  `@pytest.mark` tag (e.g. `@pytest.mark.phase2_join`) so they can be run
+  selectively.
 
 ---
 
@@ -173,6 +183,14 @@ environment at hook runtime.
 
 - `docs/` contains the normative specification. Do not contradict it in code
   comments or docstrings.
+- `docs/lifecycle/` contains the authoritative node lifecycle narrative.
+  When implementing or reviewing any phase-related code, consult the relevant
+  lifecycle document first:
+  - `docs/lifecycle/node-startup.md` — startup and IDLE
+  - `docs/lifecycle/node-join.md` — join sequence
+  - `docs/lifecycle/node-restart.md` — restart semantics per phase
+  - `docs/lifecycle/node-drain.md` — drain sequence
+- `docs/membership.md` and `docs/ring.md` are the normative FSM and ring specs.
 - Use RFC 2119 keywords (`MUST`, `SHOULD`, `MAY`) only in `docs/` markdown
   files, not in source code.
 - Keep inline comments minimal; prefer self-documenting names and docstrings.

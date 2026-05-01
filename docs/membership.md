@@ -1,11 +1,18 @@
 # Membership Model
 
 This document is the normative specification for cluster membership in
-Tourillon. It describes the `MemberPhase` finite-state machine, the local
+Tourillon. It defines the `MemberPhase` finite-state machine, the local
 failure-detection invariant, phase persistence across restarts, and the
 relationship between the two concepts.
 
----
+For the narrative lifecycle descriptions that explain *why* each transition
+happens and *what the node does* during each phase, see:
+
+- [`docs/lifecycle/node-startup.md`](lifecycle/node-startup.md) — startup and IDLE
+- [`docs/lifecycle/node-join.md`](lifecycle/node-join.md) — IDLE → JOINING → READY
+- [`docs/lifecycle/node-restart.md`](lifecycle/node-restart.md) — restart semantics per phase
+- [`docs/lifecycle/node-drain.md`](lifecycle/node-drain.md) — READY → DRAINING → IDLE
+
 
 ## 1. Fundamental Distinction
 

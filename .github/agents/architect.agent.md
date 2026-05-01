@@ -24,6 +24,10 @@ Clarify expected behavior and design a clean hexagonal architecture with explici
 - Propose module structure and responsibilities.
 - Define interfaces/protocol contracts for testability.
 - Coordinate implementation sequence across agents.
+- Verify that any proposed module or interface correctly handles all four
+  `MemberPhase` states (`IDLE`, `JOINING`, `READY`, `DRAINING`) and defines
+  explicit behaviour on restart for each phase. Consult `docs/lifecycle/`
+  before signing off on any membership or phase-related design decision.
 
 ## Operating rules
 

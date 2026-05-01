@@ -24,6 +24,10 @@ following the Architect plan and validating code produced by other agents.
 - Validate interfaces/protocol contracts.
 - Improve reliability and reduce flaky tests.
 - Report coverage focus and gaps.
+- Organise test coverage by lifecycle phase (as defined in `docs/testing.md`);
+  ensure each phase transition has at least one happy-path scenario and one
+  abort/restart scenario using in-memory fixtures. Tag tests with
+  `@pytest.mark.phase<N>_<name>` so they can be run selectively.
 
 ## Required output
 

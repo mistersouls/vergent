@@ -39,3 +39,6 @@ version: 1
 - All workers have full workspace read/write/edit access.
 - Workers follow Architect contracts.
 - All outputs use: `Plan -> Changes -> Validation -> Risks`.
+- Workers must consult `docs/lifecycle/` when implementing or reviewing any
+  code that touches `MemberPhase`, gossip, ring epochs, or restart behaviour.
+- Test coverage is organised by lifecycle phase per `docs/testing.md`.

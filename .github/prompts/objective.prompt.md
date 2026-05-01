@@ -1,8 +1,9 @@
 # Objective
 
 Define and deliver **Tourillon**, a leaderless, peer-to-peer distributed
-key-value database that guarantees predictable data evolution, deterministic convergence,
-and secure node-to-node/client-to-node communication in large, dynamic clusters.
+key-value database that guarantees predictable data evolution, deterministic
+convergence, and secure node-to-node/client-to-node communication in large,
+dynamic clusters.
 
 ## Functional Definition
 
@@ -17,6 +18,18 @@ Tourillon must:
 - Use a binary-safe, self-describing protocol.
 - Enforce mandatory mutual TLS for all communications.
 - Keep the update model lightweight, deterministic, and implementation-friendly.
+- Support deterministic restart at every `MemberPhase`: a node that crashes in
+  any phase resumes that phase correctly on restart, without operator
+  intervention and without data loss.
+
+## Node Lifecycle
+
+A Tourillon node passes through four phases: **IDLE** (started but not yet
+joined), **JOINING** (explicitly asked to join; receiving partition data from
+seeds), **READY** (fully operational), and **DRAINING** (explicitly asked to
+leave; transferring data out). Each phase has defined preconditions, permitted
+operations, and restart semantics. No phase transition happens as a side effect
+of a process restart.
 
 ## Expected Benefits
 
@@ -26,7 +39,7 @@ Tourillon must:
 - Linear-ish operational scaling across large clusters.
 - Easy deployment behind common infrastructure and load balancers.
 - Strong default transport security through mandatory mTLS.
-- Stable behavior suitable for predictable planning, testing, and operations.
+- Stable, predictable restart behaviour at every lifecycle phase.
 
 ## Scope Guardrails
 
@@ -34,3 +47,4 @@ Tourillon must:
 - Avoid introducing central coordination components.
 - Prioritize protocol clarity and cross-node interoperability.
 - Keep implementation decisions aligned with ecosystem practicality.
+- Persistence is deferred; in-memory adapters are acceptable for current milestones.
