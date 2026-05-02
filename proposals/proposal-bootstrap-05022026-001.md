@@ -1,10 +1,10 @@
 # Proposal: Bootstrap and Provisioning
 
-**Author**: Souleymane BA <soulsmister@gmail.com>
-**Status:** Accepted
-**Date:** 2026-05-02
-**Sequence:** 001
-**Schema version:** 1
+- **Author**: Souleymane BA <soulsmister@gmail.com>
+- **Status:** Accepted
+- **Date:** 2026-05-02
+- **Sequence:** 001
+- **Schema version:** 2
 
 ---
 
@@ -14,7 +14,7 @@ Before a Tourillon node can run, three things must exist: a Certificate
 Authority, a signed server certificate embedded in a node config file, and a
 signed client certificate embedded in an operator context file. This proposal
 defines the `tourillon pki ca`, `tourillon config generate`, and
-`tourctl config generate-context` commands, the TOML config format, the mTLS
+`tourillon config generate-context` commands, the TOML config format, the mTLS
 dual-endpoint model, and the low-level transport layer (envelope framing,
 dispatcher, TCP server). Everything that follows in
 the system — node startup, KV operations, inter-node gossip — depends on the
@@ -107,15 +107,18 @@ $ tourillon config generate --ca-cert ./ca.crt --ca-key ./wrong.key ...
   exit code 1
 ```
 
-### `tourctl config generate-context NAME`
+### `tourillon config generate-context NAME`
 
 Issues a client certificate signed by the supplied CA and writes a named
-context entry in `~/.config/tourillon/contexts.toml`. The context bundles the
+context entry in the specified `contexts.toml` file. The context bundles the
 cluster CA, one or both endpoint addresses, and the client credential. Writing
 is atomic (temp file + `os.replace`) to protect against mid-write crashes.
 
+`--out` is required: the destination file must be stated explicitly so that
+the operator is always aware of where credentials are written.
+
 ```
-$ tourctl config generate-context prod \
+$ tourillon config generate-context prod \
     --ca-cert ./ca.crt \
     --ca-key  ./ca.key \
     --kv   kv.prod.example.com:7700 \
@@ -124,25 +127,11 @@ $ tourctl config generate-context prod \
 
 ✓ Client certificate issued
 ✓ Context "prod" written to ~/.config/tourillon/contexts.toml
-
-$ tourctl config generate-context prod --use
-✓ Active context set to "prod"
 ```
 
-A context exposing only `--kv` is valid for `tourctl kv` commands. A context
-exposing only `--peer` is valid for operator commands (`tourctl node join`,
-`tourctl node inspect`, etc.). At least one endpoint must be present.
-The endpoint can be a load balancer address, a DNS name, or a direct node
-address — contexts carry no assumption about the underlying topology.
-
-List and switch contexts:
+To switch the active context after creation, use `tourctl config use-context`:
 
 ```
-$ tourctl config list
-  CONTEXT   KV ENDPOINT                PEER ENDPOINT
-* prod      kv.prod.example.com:7700   peer.prod.example.com:7701
-  staging   kv.staging.example.com:7700  —
-
 $ tourctl config use-context staging
 ✓ Active context set to "staging"
 ```
@@ -868,7 +857,7 @@ class CertificateIssuerPort(Protocol):
 ## Exit criteria
 
 - [ ] All test scenarios pass.
-- [ ] `tourillon pki ca` → `tourillon config generate` → `tourctl config generate-context` → `tourctl config list` completes without error in a single terminal session.
+- [ ] `tourillon pki ca` → `tourillon config generate` → `tourillon config generate-context` → `tourctl config list` completes without error in a single terminal session.
 - [ ] Connections without valid mTLS certificates are refused (no application-level response).
 - [ ] All config and context files written at mode `0600`.
 - [ ] `Envelope` round-trip (encode → wire → decode) preserves `kind`, `payload`, `correlation_id`, `schema_id`.
