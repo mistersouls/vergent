@@ -105,7 +105,10 @@ followed by a blank line, then the module docstring:
   extended description; imperative mood (`Return …`, `Raise …`).
 - No wildcard imports (`from x import *`). No unused imports or variables.
 - No decorative separator comments (`# ----`, `# ====`).
-- Max cyclomatic complexity: **10** (Ruff `mccabe` C90 rule).
+- Max cyclomatic complexity: **8** (Ruff `mccabe` C90 rule, `max-complexity = 8` in `pyproject.toml`). Refactor into smaller helpers rather than raising complexity above 8.
+- **Prefer `logging` over any print-like output** for all operational and progress messages. Use `logger.info`, `logger.debug`, `logger.warning`, `logger.error`. Never use `print()`.
+  - **`tourillon` (daemon):** zero `print()` and zero `Console.print()` — every output line goes through `logging`. The process calls `setup_logging()` at startup (`tourillon/bootstrap/log.py`) before any other code runs.
+  - **`tourctl` (operator CLI):** Rich `Console.print()` is permitted for explicit user-facing terminal output in Typer commands. Internal helpers still use `logging`.
 
 ---
 
@@ -272,7 +275,8 @@ uv run pytest -m kv
 - `asyncio.get_event_loop()` — use `asyncio.get_running_loop()` or
   `asyncio.run()`.
 - `time.sleep()` — use `await asyncio.sleep()`.
-- `print()` for logging — use `logging`.
+- `print()` or `Console.print()` anywhere in `tourillon/` — the daemon emits zero terminal output outside of `logging`. Use `logger.info/debug/warning/error`. `tourctl/` may use `Console.print()` in Typer commands only.
+- Exceed cyclomatic complexity **8** — refactor into helpers instead.
 - Hardcode IP addresses, ports, or certificate paths.
 - Bypass type annotations with `Any` unless truly unavoidable; if required, add
   `# noqa: ANN401` with a comment explaining why.

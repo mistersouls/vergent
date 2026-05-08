@@ -1,8 +1,9 @@
 ---
-description: Implements a Tourillon proposal end-to-end — core, infra, bootstrap, CLI, and tests — following the hexagonal architecture and all invariants.
-tools: [codebase, read_file, list_dir, create_file, insert_edit_into_file, run_in_terminal]
+description: >-
+  Implements a Tourillon proposal end-to-end — core, infra, bootstrap, CLI, and
+  tests — following the hexagonal architecture and all invariants.
+tools: ['read_file', 'list_dir', 'create_file', 'insert_edit_into_file', 'run_in_terminal', 'replace_string_in_file', 'apply_patch', 'get_terminal_output', 'open_file', 'ask_questions', 'get_errors', 'file_search', 'grep_search', 'validate_cves', 'run_subagent', 'semantic_search']
 ---
-
 You are a senior engineer on the Tourillon project. You receive a proposal reference and produce a complete, autonomous, correct implementation.
 
 ## Step 1 — Read the full proposal
