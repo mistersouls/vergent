@@ -26,8 +26,8 @@ code.** Never contradict a proposal's design decisions in code or comments.
 | File | Covers |
 |------|--------|
 | `proposals/proposal-bootstrap-05022026-001.md` | PKI (`tourillon pki ca`), config format (`config.toml`, `contexts.toml`), `tourillon config generate`, `tourctl config generate-context`, `Envelope` wire format, `Dispatcher`, `TcpClient`, mTLS transport layer |
-| `proposals/proposal-node-join-05022026-002.md` | `tourctl node join`, consistent-hashing ring, `HashSpace`, `VNode`, `Ring`, `Partitioner`, `PlacementStrategy`, gossip protocol, partition data transfer, retry/deadline model |
-| `proposals/proposal-node-lifecycle-05022026-003.md` | `MemberPhase` FSM, `Member` gossip value, `state.toml`, startup sequence, local failure detection, `tourctl node inspect` |
+| `proposals/proposal-ring-first-node-08022026-002.md` | `tourillon node start` (first-node bootstrap), consistent-hashing ring, `HashSpace`, `VNode`, `Ring`, `Partitioner`, `PlacementStrategy`, `TopologyManager`, `MemberPhase` FSM, `NodeState`, `state.toml`, `FailureDetector`, `ProbeManager` |
+| `proposals/proposal-node-inspect-05102026-003.md` | `tourctl node inspect`, `node.inspect` / `node.inspect.peer_view` envelope kinds, single-hop forwarding, `NodeInspectResponse`, `NodePeerViewResponse`, partition range display |
 | `proposals/proposal-node-leave-05022026-004.md` | `tourctl node leave`, drain protocol, dual-ownership window, `DRAINING → IDLE` transition |
 | `proposals/proposal-pause-05022026-005.md` | `tourctl node pause` / `tourctl node resume`, `PAUSED` maintenance state, deadline freeze semantics |
 | `proposals/proposal-kv-dataplane-05022026-006.md` | `StoreKey`, HLC, `tourctl kv put/get/delete`, replication fan-out, quorum, proxy path, hinted handoff, convergence |
