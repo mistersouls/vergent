@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from pathlib import Path
 from unittest.mock import patch
@@ -28,7 +29,9 @@ from tourillon.core.ports.pki import PkiError
 from tourillon.core.structure.envelope import Envelope
 from tourillon.infra.cli.main import app as tourillon_app
 
-_runner = CliRunner()
+_runner = CliRunner(env={"NO_COLOR": "1"})
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[mGKHF]")
 
 
 @pytest.mark.bootstrap
@@ -91,7 +94,7 @@ def test_config_generate_missing_ca_exits_nonzero() -> None:
         ["config", "generate", "--node-id", "n1"],
     )
     assert result.exit_code != 0
-    assert "--ca-cert" in result.output
+    assert "--ca-cert" in _ANSI_RE.sub("", result.output)
 
 
 @pytest.mark.bootstrap
@@ -217,7 +220,7 @@ def test_tourillon_generate_context_missing_ca_exits_nonzero() -> None:
         ["config", "generate-context", "test", "--kv", "localhost:7700"],
     )
     assert result.exit_code != 0
-    assert "--ca-cert" in result.output
+    assert "--ca-cert" in _ANSI_RE.sub("", result.output)
 
 
 @pytest.mark.bootstrap
