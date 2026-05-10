@@ -89,6 +89,11 @@ class Partitioner:
         """Return the total number of logical partitions (2**partition_shift)."""
         return self._total
 
+    @property
+    def partition_shift(self) -> int:
+        """Return the partition shift value (log₂ of total_partitions)."""
+        return self._shift
+
     def pid_for_hash(self, h: int) -> int:
         """Return the partition ID for hash h in O(1)."""
         return h >> (self._hs.bits - self._shift)

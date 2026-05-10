@@ -27,14 +27,24 @@ import typer
 from tourillon.bootstrap.config import ConfigError, load_config_file
 from tourillon.bootstrap.lock import PidLock
 from tourillon.bootstrap.log import setup_logging
+from tourillon.core.handlers.inspect import (
+    NodeInspectHandler,
+    NodeInspectPeerViewHandler,
+)
 from tourillon.core.lifecycle.bootstrap import BootstrapError, run_first_node_bootstrap
+from tourillon.core.lifecycle.probe import ProbeManager
 from tourillon.core.ring.hashspace import HashSpace
+from tourillon.core.ring.partitioner import Partitioner
 from tourillon.core.ring.topology import TopologyManager
 from tourillon.core.structure.config import TourillonConfig
 from tourillon.core.transport.dispatcher import Dispatcher
 from tourillon.core.transport.server import TcpServer
+from tourillon.infra.serializer.msgpack import MsgpackSerializerAdapter
 from tourillon.infra.store.state import FileStateAdapter
-from tourillon.infra.tls.context import build_server_ssl_context
+from tourillon.infra.tls.context import (
+    build_client_ssl_context,
+    build_server_ssl_context,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +96,7 @@ async def _run(cfg: TourillonConfig) -> None:
         logger.debug("PID lock acquired; data directory is %s.", data_dir)
         hash_space = HashSpace()
         topology_mgr = TopologyManager()
+        probe_mgr = ProbeManager()
         state_port = FileStateAdapter(data_dir / "state.toml")
 
         try:
@@ -99,12 +110,46 @@ async def _run(cfg: TourillonConfig) -> None:
         ssl_ctx = build_server_ssl_context(
             cfg.tls.cert_data, cfg.tls.key_data, cfg.tls.ca_data
         )
+        client_ssl_ctx = build_client_ssl_context(
+            cfg.tls.cert_data, cfg.tls.key_data, cfg.tls.ca_data
+        )
         logger.debug("mTLS context loaded from embedded certificate.")
+
+        partitioner = Partitioner(hash_space, cfg.partition_shift)
+        serializer = MsgpackSerializerAdapter()
+
+        peer_address = cfg.peer_server.advertise or cfg.peer_server.bind
+        kv_address = cfg.kv_server.advertise or cfg.kv_server.bind
+        state_ref = [state]
+
+        inspect_handler = NodeInspectHandler(
+            node_id=cfg.node_id,
+            get_state=lambda: state_ref[0],
+            topology_manager=topology_mgr,
+            probe_manager=probe_mgr,
+            partitioner=partitioner,
+            peer_address=peer_address,
+            kv_address=kv_address,
+            size=str(cfg.node_size),
+            serializer=serializer,
+            tls_ctx=client_ssl_ctx,
+            attempt_timeout=cfg.join.attempt_timeout,
+        )
+        peer_view_handler = NodeInspectPeerViewHandler(
+            node_id=cfg.node_id,
+            topology_manager=topology_mgr,
+            probe_manager=probe_mgr,
+            serializer=serializer,
+        )
 
         peer_host, peer_port = _parse_bind(cfg.peer_server.bind)
         kv_host, kv_port = _parse_bind(cfg.kv_server.bind)
 
-        peer_server = TcpServer(Dispatcher(), ssl_ctx, name="Peer")
+        peer_dispatcher = Dispatcher()
+        peer_dispatcher.register("node.inspect", inspect_handler)
+        peer_dispatcher.register("node.inspect.peer_view", peer_view_handler)
+
+        peer_server = TcpServer(peer_dispatcher, ssl_ctx, name="Peer")
         kv_server = TcpServer(Dispatcher(), ssl_ctx, name="KV")
 
         await peer_server.start(peer_host, peer_port)

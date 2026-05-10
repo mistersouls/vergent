@@ -165,3 +165,32 @@ def test_fsync_dir_covers_inner_try_finally(tmp_path: Path) -> None:
         patch("tourillon.infra.store.state.os.close"),
     ):
         _fsync_dir(tmp_path)  # OSError must be swallowed
+
+
+# ---------------------------------------------------------------------------
+# MsgpackSerializerAdapter extension type tests
+# ---------------------------------------------------------------------------
+
+
+def test_msgpack_serializer_round_trips_128_bit_token() -> None:
+    """128-bit integers are encoded as ExtType and decoded back to int."""
+    from tourillon.infra.serializer.msgpack import MsgpackSerializerAdapter
+
+    s = MsgpackSerializerAdapter()
+    token = 2**127 + 12345  # well above uint64 max
+    data = {"token": token, "small": 42}
+    encoded = s.encode(data)
+    decoded = s.decode(encoded)
+    assert decoded["token"] == token
+    assert decoded["small"] == 42
+
+
+def test_msgpack_serializer_raises_for_unknown_type() -> None:
+    """encode raises TypeError for arbitrary objects it cannot serialise."""
+    import pytest
+
+    from tourillon.infra.serializer.msgpack import MsgpackSerializerAdapter
+
+    s = MsgpackSerializerAdapter()
+    with pytest.raises(TypeError):
+        s.encode({"x": object()})

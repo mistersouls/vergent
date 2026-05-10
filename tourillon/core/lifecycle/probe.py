@@ -101,6 +101,24 @@ class ProbeManager:
             if node_id not in self._detectors:
                 self._detectors[node_id] = FailureDetector()
 
+    async def phi_of(self, node_id: str) -> float:
+        """Return the current φ value for node_id; 0.0 when no observations."""
+        async with self._lock:
+            det = self._detectors.get(node_id)
+            return det.phi() if det is not None else 0.0
+
+    async def all_states_with_phi(self) -> list[tuple[str, MemberState, float]]:
+        """Return a list of (node_id, MemberState, phi) for all tracked peers.
+
+        The list is built under the lock and is safe to iterate without
+        further synchronisation. The ordering is not defined.
+        """
+        async with self._lock:
+            return [
+                (nid, self._state_of_unlocked(nid), det.phi())
+                for nid, det in self._detectors.items()
+            ]
+
     def _state_of_unlocked(self, node_id: str) -> MemberState:
         """Return MemberState for node_id without acquiring the lock."""
         detector = self._detectors.get(node_id)

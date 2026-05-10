@@ -64,12 +64,14 @@ class _ConnectionSession:
 
     async def run(self) -> None:
         """Read and dispatch Envelopes until the connection should close."""
+        logger.debug("Accepted connection from %s.", self._peer)
         try:
             await self._dispatch_loop()
         except Exception:  # noqa: pragma: no cover
-            logger.exception("connection loop error", extra={"peer": str(self._peer)})
+            logger.exception("Unhandled error on connection from %s.", self._peer)
         finally:
             await self._close()
+            logger.debug("Closed connection from %s.", self._peer)
 
     async def send(self, env: Envelope) -> None:
         """Write *env* to the wire, serialised under the write lock."""
@@ -82,12 +84,9 @@ class _ConnectionSession:
         while True:
             if len(self._in_flight) >= MAX_IN_FLIGHT_PER_CONN:
                 logger.warning(
-                    "too_many_in_flight",
-                    extra={
-                        "event": "too_many_in_flight",
-                        "count": len(self._in_flight),
-                        "peer": str(self._peer),
-                    },
+                    "Too many in-flight requests (%d) on connection from %s; closing.",
+                    len(self._in_flight),
+                    self._peer,
                 )
                 break
 
@@ -98,11 +97,13 @@ class _ConnectionSession:
             handler = self._dispatcher.lookup(env.kind)
             if handler is None:
                 logger.debug(
-                    "unknown_kind",
-                    extra={"kind": env.kind, "peer": str(self._peer)},
+                    "Unknown envelope kind %r from %s; closing connection.",
+                    env.kind,
+                    self._peer,
                 )
                 break
 
+            logger.debug("Dispatching %r from %s.", env.kind, self._peer)
             self._spawn_handler(env, handler)
 
     async def _read_next(self) -> Envelope | None:
@@ -116,16 +117,10 @@ class _ConnectionSession:
                 correlation_id=exc.correlation_id,
             )
             await self.send(error_env)
-            logger.warning(
-                exc.error_kind,
-                extra={"event": exc.error_kind, "peer": str(self._peer)},
-            )
+            logger.warning("Protocol error from %s: %s.", self._peer, exc.error_kind)
             return None
         except (TimeoutError, asyncio.IncompleteReadError, OSError):
-            logger.debug(
-                "read_timeout",
-                extra={"event": "read_timeout", "peer": str(self._peer)},
-            )
+            logger.debug("Read error or timeout on connection from %s.", self._peer)
             return None
 
     def _spawn_handler(self, env: Envelope, handler: Callable) -> None:  # noqa: ANN001
@@ -151,8 +146,9 @@ class _ConnectionSession:
             raise
         except Exception:
             logger.exception(
-                "handler error",
-                extra={"kind": env.kind, "peer": str(self._peer)},
+                "Handler %r raised an unhandled exception (peer %s).",
+                env.kind,
+                self._peer,
             )
         finally:
             self._in_flight.discard(env.correlation_id.bytes)
