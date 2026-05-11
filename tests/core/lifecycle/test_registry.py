@@ -31,6 +31,7 @@ def _member(node_id: str, phase: MemberPhase, seq: int = 0) -> Member:
         seq=seq,
         phase=phase,
         tokens=(42,),
+        partition_shift=10,
     )
 
 

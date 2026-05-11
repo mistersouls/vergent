@@ -38,6 +38,7 @@ def _member(
         seq=seq,
         phase=phase,
         tokens=tokens,
+        partition_shift=10,
     )
 
 
@@ -96,3 +97,57 @@ async def test_15_merge_registry_is_atomic() -> None:
     assert len(list(snap.registry)) == 5
     for i in range(5):
         assert snap.registry.get(f"node-{i}") is not None
+
+
+@pytest.mark.ring
+async def test_topology_members_in_phase_returns_matching_members() -> None:
+    """members_in_phase() on a Topology snapshot returns all matching members."""
+    mgr = TopologyManager()
+    await mgr.apply_member(_member("node-r", MemberPhase.READY))
+    await mgr.apply_member(_member("node-j", MemberPhase.JOINING))
+
+    snap = await mgr.snapshot()
+    ready = snap.members_in_phase(MemberPhase.READY)
+    assert "node-r" in ready
+    assert "node-j" not in ready
+
+
+@pytest.mark.ring
+async def test_topology_active_node_ids_includes_ready_draining_paused() -> None:
+    """active_node_ids returns READY, DRAINING, and PAUSED node_ids only."""
+    mgr = TopologyManager()
+    await mgr.apply_member(_member("r", MemberPhase.READY, tokens=(10, 50)))
+    # D needs to go through READY first to get vnodes in ring
+    await mgr.apply_member(_member("d", MemberPhase.READY, tokens=(20, 60), seq=0))
+    await mgr.apply_member(_member("d", MemberPhase.DRAINING, tokens=(20, 60), seq=1))
+    await mgr.apply_member(_member("j", MemberPhase.JOINING))
+
+    snap = await mgr.snapshot()
+    active = snap.active_node_ids
+    assert "r" in active
+    assert "d" in active
+    assert "j" not in active
+
+
+@pytest.mark.ring
+async def test_topology_draining_to_idle_drops_vnodes_from_ring() -> None:
+    """DRAINING → IDLE transition removes node vnodes from ring and increments epoch."""
+    mgr = TopologyManager()
+    # Put node into ring via READY
+    await mgr.apply_member(
+        _member("node-d", MemberPhase.READY, tokens=(50, 150), seq=0)
+    )
+    snap1 = await mgr.snapshot()
+    assert len(snap1.ring) == 2
+    epoch_after_ready = snap1.epoch
+
+    # Transition to DRAINING (vnodes stay)
+    await mgr.apply_member(
+        _member("node-d", MemberPhase.DRAINING, tokens=(50, 150), seq=1)
+    )
+
+    # Transition to IDLE (vnodes removed)
+    await mgr.apply_member(_member("node-d", MemberPhase.IDLE, tokens=(), seq=2))
+    snap2 = await mgr.snapshot()
+    assert len(snap2.ring) == 0
+    assert snap2.epoch > epoch_after_ready

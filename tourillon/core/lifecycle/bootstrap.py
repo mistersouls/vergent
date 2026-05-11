@@ -92,6 +92,7 @@ async def _bootstrap_idle(
     tokens = tuple(secrets.randbelow(hash_space.max) for _ in range(token_count))
 
     state = NodeState(
+        node_id=cfg.node_id,
         phase=MemberPhase.READY,
         generation=1,
         seq=0,
@@ -118,6 +119,7 @@ async def _bootstrap_idle(
         seq=0,
         phase=MemberPhase.READY,
         tokens=tokens,
+        partition_shift=cfg.partition_shift,
     )
     await topology_mgr.apply_member(member)
     return state
@@ -149,6 +151,7 @@ async def _restart_ready(
         seq=state.seq,
         phase=MemberPhase.READY,
         tokens=state.tokens,
+        partition_shift=cfg.partition_shift,
     )
     await topology_mgr.apply_member(member)
     _ = partitioner  # injected for future use by callers

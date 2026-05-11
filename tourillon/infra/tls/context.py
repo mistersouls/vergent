@@ -114,19 +114,25 @@ def build_client_ssl_context(
     b64_cert_pem: str,
     b64_key_pem: str,
     b64_ca_pem: str,
-    server_hostname: str = "",
 ) -> ssl.SSLContext:
     """Build a client-side mTLS SSLContext from inline base64-encoded PEM.
 
     The context presents a client certificate and verifies the server against
-    the cluster CA. There is no plaintext fallback.
+    the cluster CA.  Hostname verification is intentionally disabled: Tourillon
+    uses **CA-based identity** rather than DNS-based identity.  Every node that
+    holds a certificate signed by the cluster CA is a legitimate peer,
+    regardless of its hostname or IP address.  This is the standard model for
+    distributed databases (etcd, CockroachDB, Cassandra) operating in a private
+    cluster where the CA is the single root of trust.
+
+    There is no plaintext fallback: verify_mode is always CERT_REQUIRED.
     """
     cert_pem = _decode_pem(b64_cert_pem, "cert_data")
     key_pem = _decode_pem(b64_key_pem, "key_data")
     ca_pem = _decode_pem(b64_ca_pem, "ca_data")
 
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ctx.check_hostname = bool(server_hostname)
+    ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_REQUIRED
 
     with tempfile.TemporaryDirectory() as td:

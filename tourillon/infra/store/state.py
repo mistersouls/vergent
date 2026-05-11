@@ -108,6 +108,7 @@ def _parse_state(raw: dict[str, Any]) -> NodeState:
         node = raw["node"]
         topo: dict[str, Any] = raw.get("topology", {})
         return NodeState(
+            node_id=str(node.get("node_id", "")),
             phase=MemberPhase(node["phase"]),
             generation=int(node["generation"]),
             seq=int(node["seq"]),
@@ -122,6 +123,7 @@ def _encode_state(state: NodeState) -> dict[str, Any]:
     """Encode a NodeState into a TOML-serialisable dict."""
     return {
         "node": {
+            "node_id": state.node_id,
             "phase": state.phase.value,
             "generation": state.generation,
             "seq": state.seq,

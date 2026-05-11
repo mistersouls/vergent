@@ -117,8 +117,8 @@ def valid_config_dict(
             "ca_data": base64.b64encode(ca_cert_pem).decode(),
         },
         "servers": {
-            "kv": {"bind": "0.0.0.0:7700", "advertise": ""},
-            "peer": {"bind": "0.0.0.0:7701", "advertise": ""},
+            "kv": {"bind": "127.0.0.1:7700", "advertise": ""},
+            "peer": {"bind": "127.0.0.1:7701", "advertise": ""},
         },
         "cluster": {"seeds": [], "rf": 3, "partition_shift": 10},
     }

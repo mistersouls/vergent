@@ -86,6 +86,7 @@ async def test_9_idle_no_seeds_bootstraps_directly_to_ready() -> None:
 async def test_10_ready_phase_raises_bootstrap_error() -> None:
     """Raises BootstrapError(exit_code=1); error "node is already READY"; state unchanged."""
     existing = NodeState(
+        node_id="node-1",
         phase=MemberPhase.READY,
         generation=1,
         seq=0,
@@ -120,6 +121,7 @@ async def test_10_ready_phase_raises_bootstrap_error() -> None:
 async def test_11_joining_phase_raises_bootstrap_error() -> None:
     """Raises BootstrapError(exit_code=1); error "unexpected phase JOINING"."""
     joining_state = NodeState(
+        node_id="node-1",
         phase=MemberPhase.JOINING,
         generation=1,
         seq=0,

@@ -75,6 +75,9 @@ class _ConnectionSession:
 
     async def send(self, env: Envelope) -> None:
         """Write *env* to the wire, serialised under the write lock."""
+        logger.debug(
+            "→ %s  cid=%.8s  peer=%s", env.kind, env.correlation_id, self._peer
+        )
         data = env.encode()
         async with self._write_lock:
             self._writer.write(data)
@@ -103,7 +106,9 @@ class _ConnectionSession:
                 )
                 break
 
-            logger.debug("Dispatching %r from %s.", env.kind, self._peer)
+            logger.debug(
+                "← %s  cid=%.8s  peer=%s", env.kind, env.correlation_id, self._peer
+            )
             self._spawn_handler(env, handler)
 
     async def _read_next(self) -> Envelope | None:

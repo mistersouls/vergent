@@ -70,6 +70,11 @@ class FailureDetector:
             return 0.0
         return elapsed / (mean * math.log(10))
 
+    @property
+    def has_observations(self) -> bool:
+        """Return True if at least one heartbeat has been recorded."""
+        return self._last_arrival is not None
+
     def is_available(self, threshold: float = 8.0) -> bool:
         """Return True when phi() < threshold.
 

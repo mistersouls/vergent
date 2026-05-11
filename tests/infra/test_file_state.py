@@ -65,6 +65,7 @@ async def test_18_save_then_load_round_trips_state(state_path: Path) -> None:
     """Round-trip: loaded state equals saved state."""
     adapter = FileStateAdapter(state_path)
     original = NodeState(
+        node_id="node-1",
         phase=MemberPhase.READY,
         generation=2,
         seq=3,
@@ -84,6 +85,7 @@ async def test_20_load_ignores_tmp_file_left_by_crashed_write(
     """Old state returned; temp file is ignored; no StateError."""
     state_path = tmp_path / "state.toml"
     old_state = NodeState(
+        node_id="node-1",
         phase=MemberPhase.IDLE,
         generation=0,
         seq=0,
@@ -129,6 +131,7 @@ async def test_save_raises_state_error_on_write_failure(state_path: Path) -> Non
     """save() raises StateError when writing the temp file fails."""
     adapter = FileStateAdapter(state_path)
     state = NodeState(
+        node_id="node-1",
         phase=MemberPhase.READY,
         generation=1,
         seq=0,

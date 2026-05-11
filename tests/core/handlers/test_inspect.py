@@ -67,8 +67,10 @@ def _make_node_state(
     seq: int = 0,
     tokens: tuple[int, ...] = (),
     epoch: int = 1,
+    node_id: str = "node-1",
 ) -> NodeState:
     return NodeState(
+        node_id=node_id,
         phase=phase,
         generation=generation,
         seq=seq,
@@ -90,6 +92,7 @@ def _make_member(
         seq=seq,
         phase=phase,
         tokens=tokens,
+        partition_shift=10,
     )
 
 
@@ -894,6 +897,7 @@ async def test_16_empty_peer_address_returns_node_not_found() -> None:
         seq=0,
         phase=MemberPhase.READY,
         tokens=(),
+        partition_shift=10,
     )
     tm = await _make_topology([_make_member("node-1"), member_empty])
 

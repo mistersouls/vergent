@@ -211,6 +211,7 @@ class InspectCommand:
         self._render_ring_section(data, show_all_partitions)
         self._render_members_section(data, target_node_id)
         self._render_probe_section(data, target_node_id)
+        self._render_gossip_stats_section(data)
 
         if data.get("members_truncated"):
             shown = len(data.get("members", []))
@@ -295,6 +296,31 @@ class InspectCommand:
             nid = p.get("node_id", "")
             state = p.get("state", "").upper()
             self._console.print(f"    {nid}   {state}")
+
+    def _render_gossip_stats_section(self, data: dict[str, Any]) -> None:
+        """Render the Gossip stats section when gossip_stats is present."""
+        stats: dict[str, Any] = data.get("gossip_stats", {})
+        if not stats:
+            return
+        self._console.print("\n  [bold]Gossip stats:[/bold]")
+        self._console.print(f"    Known members:      {stats.get('known_members', 0)}")
+        self._console.print(
+            f"    Push sent total:    {stats.get('push_sent_total', 0)}"
+        )
+        self._console.print(
+            f"    Push recv total:    {stats.get('push_recv_total', 0)}"
+        )
+        ae_total = stats.get("ae_cycles_total", 0)
+        ae_div = stats.get("ae_diverged", 0)
+        self._console.print(
+            f"    AE cycles total:    {ae_total}     diverged: {ae_div}"
+        )
+        last_peer = stats.get("last_ae_peer") or "—"
+        last_at = stats.get("last_ae_at") or "—"
+        self._console.print(f"    Last AE peer:       {last_peer}   at {last_at}")
+        ok = stats.get("bootstrap_ok_total", 0)
+        err = stats.get("bootstrap_err_total", 0)
+        self._console.print(f"    Bootstrap seeds ok: {ok}   err: {err}")
 
     def _render_peer_view(
         self,

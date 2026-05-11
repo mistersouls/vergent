@@ -86,8 +86,7 @@ markers = [
   "bootstrap: proposal 001 — bootstrap and provisioning",
   "ring: proposal 002 — consistent-hashing ring",
   "inspect: proposal 003 — node inspect command",
-  "leave: proposal 004 — node leave / drain",
-  "pause: proposal 005 — pause / resume",
-  "kv: proposal 006 — KV data-plane",
+  "gossip: proposal 004 — gossip engine and seeded join",
+  "lifecycle: proposal 002/004 — member phase FSM and probe manager",
   "e2e: end-to-end tests requiring real sockets",
 ]

@@ -122,7 +122,7 @@ class ProbeManager:
     def _state_of_unlocked(self, node_id: str) -> MemberState:
         """Return MemberState for node_id without acquiring the lock."""
         detector = self._detectors.get(node_id)
-        if detector is None:
+        if detector is None or not detector.has_observations:
             return MemberState.UNKNOWN
         if detector.is_available(_SUSPECT_THRESHOLD):
             return MemberState.LIVE

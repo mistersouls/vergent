@@ -46,6 +46,11 @@ class Member:
     never changes afterwards. An IDLE node that has not yet started carries
     an empty tuple.
 
+    partition_shift is a cluster-wide constant: all nodes must declare the same
+    value. A receiving node that observes a mismatch in gossip.push sends
+    gossip.error code: partition_shift_mismatch back; the node whose data is
+    rejected transitions to FAILED via write-before-announce → announce → stop.
+
     supersedes() is the canonical comparator used by MemberRegistry.upsert()
     and by the gossip merge logic. Two records for the same node_id are
     compared on (generation, seq): a higher generation always wins regardless
@@ -58,6 +63,9 @@ class Member:
     seq: int
     phase: MemberPhase
     tokens: tuple[int, ...]  # empty for IDLE; populated at join transition
+    partition_shift: (
+        int  # cluster-wide hash-space shift; must be identical on all nodes
+    )
 
     def supersedes(self, other: Member) -> bool:
         """Return True when self is strictly newer than other.

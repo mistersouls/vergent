@@ -89,3 +89,37 @@ def test_partitioner_pid_for_hash_in_range() -> None:
     for h in range(256):
         pid = p.pid_for_hash(h)
         assert 0 <= pid < p.total_partitions
+
+
+@pytest.mark.ring
+def test_logical_partition_contains_no_wraparound() -> None:
+    """contains() returns True for h in (start, end] when start < end (no wrap)."""
+    from tourillon.core.ring.partitioner import LogicalPartition
+
+    lp = LogicalPartition(pid=0, start=10, end=50)
+    assert lp.contains(11) is True
+    assert lp.contains(50) is True
+    assert lp.contains(10) is False
+    assert lp.contains(51) is False
+
+
+@pytest.mark.ring
+def test_logical_partition_contains_wraparound() -> None:
+    """contains() handles wrap-around when start >= end."""
+    from tourillon.core.ring.partitioner import LogicalPartition
+
+    lp = LogicalPartition(pid=0, start=200, end=50)
+    assert lp.contains(201) is True
+    assert lp.contains(10) is True
+    assert lp.contains(100) is False
+
+
+@pytest.mark.ring
+def test_partition_placement_address_returns_pid_string() -> None:
+    """PartitionPlacement.address returns str(pid)."""
+    from tourillon.core.ring.partitioner import LogicalPartition, PartitionPlacement
+    from tourillon.core.ring.vnode import VNode
+
+    lp = LogicalPartition(pid=7, start=0, end=100)
+    pp = PartitionPlacement(partition=lp, vnode=VNode("node-1", 50))
+    assert pp.address == "7"

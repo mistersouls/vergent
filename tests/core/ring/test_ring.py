@@ -97,3 +97,20 @@ def test_12b_successor_wraps_around() -> None:
     ring = Ring(_vnodes("node-a", [50, 150]))
     # token 200 > 150 → wraps to first vnode (token 50)
     assert ring.successor(200).token == 50
+
+
+@pytest.mark.ring
+def test_successor_empty_ring_raises_value_error() -> None:
+    """successor() raises ValueError when ring is empty."""
+    ring = Ring.empty()
+    with pytest.raises(ValueError, match="empty ring"):
+        ring.successor(42)
+
+
+@pytest.mark.ring
+def test_iter_from_empty_ring_yields_nothing() -> None:
+    """iter_from() on an empty ring yields zero vnodes."""
+    ring = Ring.empty()
+    dummy = VNode(node_id="x", token=0)
+    result = list(ring.iter_from(dummy))
+    assert result == []

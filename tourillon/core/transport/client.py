@@ -56,6 +56,7 @@ class TcpClient:
         self._reader: asyncio.StreamReader | None = None
         self._read_task: asyncio.Task[None] | None = None
         self._write_lock = asyncio.Lock()
+        self._addr: str = ""
         # correlation_id bytes → Future[Envelope] for request()
         self._pending: dict[bytes, asyncio.Future[Envelope]] = {}
         # correlation_id bytes → Queue[Envelope] for stream()
@@ -73,12 +74,13 @@ class TcpClient:
         self._reader, self._writer = await asyncio.open_connection(
             host, port, ssl=tls_ctx
         )
+        self._addr = addr
         self._closed = False
         loop = asyncio.get_running_loop()
         self._read_task = loop.create_task(
             self._read_loop(), name="TcpClient.read_loop"
         )
-        logger.debug("connected", extra={"addr": addr})
+        logger.debug("connected addr=%s", addr)
 
     async def request(
         self,
@@ -182,6 +184,9 @@ class TcpClient:
 
     async def _send(self, env: Envelope) -> None:
         assert self._writer is not None
+        logger.debug(
+            "→ %s  cid=%.8s  addr=%s", env.kind, env.correlation_id, self._addr
+        )
         data = env.encode()
         async with self._write_lock:
             self._writer.write(data)
@@ -192,6 +197,12 @@ class TcpClient:
         try:
             while True:
                 env = await read_envelope(self._reader)
+                logger.debug(
+                    "← %s  cid=%.8s  addr=%s",
+                    env.kind,
+                    env.correlation_id,
+                    self._addr,
+                )
                 key = env.correlation_id.bytes
 
                 if key in self._pending:
@@ -202,11 +213,10 @@ class TcpClient:
                     await self._streams[key].put(env)
                 else:
                     logger.debug(
-                        "unsolicited_envelope",
-                        extra={
-                            "kind": env.kind,
-                            "correlation_id": str(env.correlation_id),
-                        },
+                        "← unsolicited %s  cid=%.8s  addr=%s",
+                        env.kind,
+                        env.correlation_id,
+                        self._addr,
                     )
         except (asyncio.IncompleteReadError, ConnectionResetError, OSError):
             pass

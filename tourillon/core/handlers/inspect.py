@@ -210,6 +210,7 @@ class NodeInspectHandler:
         tls_ctx: ssl.SSLContext | None = None,
         attempt_timeout: float = RESPONSE_TIMEOUT,
         client_factory: TcpClientFactory | None = None,
+        get_gossip_stats: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self._node_id = node_id
         self._get_state = get_state
@@ -223,6 +224,7 @@ class NodeInspectHandler:
         self._tls_ctx = tls_ctx
         self._attempt_timeout = attempt_timeout
         self._client_factory = client_factory
+        self._get_gossip_stats = get_gossip_stats
 
     async def __call__(
         self,
@@ -291,6 +293,9 @@ class NodeInspectHandler:
             "probe_states": probe_list,
             "probe_states_truncated": probe_truncated,
             "forwarded_by": None,
+            "gossip_stats": (
+                self._get_gossip_stats() if self._get_gossip_stats is not None else {}
+            ),
         }
         return _truncate_to_budget(resp, self._serializer)
 

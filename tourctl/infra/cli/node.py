@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""tourctl node subcommands — operator-facing node inspection commands."""
+"""tourctl node subcommands — operator-facing node inspection and join commands."""
 
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ from rich.console import Console
 
 from tourctl.core.commands.config import ContextsError, load_contexts
 from tourctl.core.commands.inspect import InspectCommand
+from tourctl.core.commands.node_join import NodeJoinCommand
 from tourillon.core.ports.transport import RESPONSE_TIMEOUT
 from tourillon.core.transport.client import TcpClient
 from tourillon.infra.serializer.msgpack import MsgpackSerializerAdapter
@@ -95,6 +96,57 @@ def node_inspect(
     raise typer.Exit(exit_code)
 
 
+@node_app.command("join")
+def node_join(
+    peer_address: Annotated[
+        str,
+        typer.Argument(
+            help="Peer server address of the target node (e.g. 10.0.0.2:7701)"
+        ),
+    ],
+    seeds: Annotated[
+        list[str] | None,
+        typer.Option("--seeds", help="Seed addresses (overrides config.toml seeds)"),
+    ] = None,
+    timeout: Annotated[
+        float,
+        typer.Option("--timeout", help="Response timeout in seconds"),
+    ] = RESPONSE_TIMEOUT,
+    contexts_path: Annotated[Path, typer.Option("--contexts")] = _DEFAULT_CONTEXTS_PATH,
+) -> None:
+    """Trigger the IDLE → JOINING transition on a running daemon.
+
+    Connects directly to PEER_ADDRESS (the target node's peer server).
+    TLS credentials are taken from the active context.
+    """
+    try:
+        contexts_file = load_contexts(contexts_path)
+    except ContextsError as exc:
+        _err_console.print(f"✗ {exc}")
+        raise typer.Exit(1) from exc
+
+    ctx = (
+        contexts_file.get(contexts_file.current_context)
+        if contexts_file.current_context
+        else None
+    )
+    if ctx is None:
+        _err_console.print("✗ No active context. Use `tourctl config use-context`.")
+        raise typer.Exit(1)
+
+    exit_code = asyncio.run(
+        _run_join(
+            ctx.credentials.cert_data,
+            ctx.credentials.key_data,
+            ctx.cluster.ca_data,
+            peer_address,
+            seeds=seeds,
+            timeout=timeout,
+        )
+    )
+    raise typer.Exit(exit_code)
+
+
 async def _run_inspect(
     cert_data: str,
     key_data: str,
@@ -131,5 +183,37 @@ async def _run_inspect(
             json_output=json_output,
             timeout=timeout,
         )
+    finally:
+        await client.close()
+
+
+async def _run_join(
+    cert_data: str,
+    key_data: str,
+    ca_data: str,
+    peer_address: str,
+    *,
+    seeds: list[str] | None,
+    timeout: float,
+) -> int:
+    """Connect directly to the target peer address and send node.join."""
+    tls_ctx = build_client_ssl_context(cert_data, key_data, ca_data)
+    client = TcpClient()
+    try:
+        await client.connect(peer_address, tls_ctx)
+    except OSError as exc:
+        _err_console.print(f"✗ Cannot connect to {peer_address}: {exc}")
+        return 1
+
+    serializer = MsgpackSerializerAdapter()
+    cmd = NodeJoinCommand(
+        client=client,
+        serializer=serializer,
+        console=_console,
+        err_console=_err_console,
+        peer_address=peer_address,
+    )
+    try:
+        return await cmd.run(seeds=seeds, timeout=timeout)
     finally:
         await client.close()

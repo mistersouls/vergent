@@ -51,8 +51,8 @@ def config_generate(
     size: Annotated[
         str, typer.Option("--size", help="Node size (XS S M L XL XXL)")
     ] = "M",
-    kv_bind: Annotated[str, typer.Option("--kv-bind")] = "0.0.0.0:7700",
-    peer_bind: Annotated[str, typer.Option("--peer-bind")] = "0.0.0.0:7701",
+    kv_bind: Annotated[str, typer.Option("--kv-bind")] = "127.0.0.1:7700",
+    peer_bind: Annotated[str, typer.Option("--peer-bind")] = "127.0.0.1:7701",
     out: Annotated[Path, typer.Option("--out")] = Path("config.toml"),
     valid_days: Annotated[int, typer.Option("--valid-days")] = 365,
     log_level: Annotated[str, typer.Option("--log-level")] = "INFO",

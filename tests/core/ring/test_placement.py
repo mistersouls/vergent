@@ -35,6 +35,7 @@ def _member(node_id: str, phase: MemberPhase, token: int, seq: int = 0) -> Membe
         seq=seq,
         phase=phase,
         tokens=(token,),
+        partition_shift=10,
     )
 
 
@@ -125,3 +126,169 @@ async def test_6_preference_list_suspect_node_gets_handoff_no_duplicates() -> No
     by_id = {e.node_id: e for e in result}
     if "C" in by_id:
         assert by_id["C"].suspect is True
+
+
+@pytest.mark.ring
+async def test_placement_excluded_phase_node_in_ring_is_skipped() -> None:
+    """Nodes in FAILED phase are in ring but excluded from the preference list."""
+    mgr = TopologyManager()
+    # Node A: READY then FAILED — vnodes stay in ring but phase is FAILED.
+    await mgr.apply_member(_member("A", MemberPhase.READY, 20, seq=0))
+    await mgr.apply_member(_member("A", MemberPhase.FAILED, 20, seq=1))
+    # Node B: stays READY — should appear in preference list.
+    await mgr.apply_member(_member("B", MemberPhase.READY, 80, seq=0))
+
+    snap = await mgr.snapshot()
+    probe = ProbeManager()
+    strategy = SimplePreferenceStrategy(rf=3)
+
+    placement = PartitionPlacement(
+        partition=LogicalPartition(pid=0, start=0, end=10),
+        vnode=VNode("A", 20),
+    )
+
+    result = await strategy.preference_list(placement, snap, probe)
+    node_ids = [e.node_id for e in result]
+    assert "A" not in node_ids
+    assert "B" in node_ids
+
+
+@pytest.mark.ring
+async def test_placement_vnode_in_ring_missing_from_registry_skipped_with_warning() -> (
+    None
+):
+    """When a ring VNode has no matching registry entry the entry is skipped (logs WARNING)."""
+    from tourillon.core.lifecycle.registry import MemberRegistry
+    from tourillon.core.ring.ring import Ring
+    from tourillon.core.ring.topology import Topology
+
+    # Build a ring with a vnode for "ghost" which is NOT in the registry.
+    ghost_vnode = VNode("ghost", 50)
+    real_member = _member("real", MemberPhase.READY, 100)
+    registry = MemberRegistry()
+    registry.upsert(real_member)
+    ring = Ring([ghost_vnode, VNode("real", 100)])
+    topology = Topology(epoch=0, registry=registry.snapshot(), ring=ring)
+
+    probe = ProbeManager()
+    strategy = SimplePreferenceStrategy(rf=3)
+
+    placement = PartitionPlacement(
+        partition=LogicalPartition(pid=0, start=0, end=10),
+        vnode=ghost_vnode,
+    )
+
+    result = await strategy.preference_list(placement, topology, probe)
+    node_ids = [e.node_id for e in result]
+    assert "ghost" not in node_ids
+    assert "real" in node_ids
+
+
+@pytest.mark.ring
+async def test_placement_handoff_candidate_yielded_for_unseen_live_node() -> None:
+    """_handoff_candidates yields node_ids of live unseen nodes clockwise from last primary."""
+    mgr = TopologyManager()
+    # 4 READY nodes; RF=2 so 2 are primary, 2 may be handoff candidates.
+    await mgr.apply_member(_member("A", MemberPhase.READY, 10, seq=0))
+    await mgr.apply_member(_member("B", MemberPhase.READY, 40, seq=0))
+    await mgr.apply_member(_member("C", MemberPhase.READY, 80, seq=0))
+    await mgr.apply_member(_member("D", MemberPhase.READY, 120, seq=0))
+
+    snap = await mgr.snapshot()
+
+    # Make A suspect — it will need a handoff target
+    probe = ProbeManager()
+    import time
+
+    await probe.record_heartbeat("A")
+    await probe.record_heartbeat("A")
+    probe._detectors["A"]._last_arrival = time.monotonic() - 10000  # noqa: SLF001
+
+    strategy = SimplePreferenceStrategy(rf=2)
+    placement = PartitionPlacement(
+        partition=LogicalPartition(pid=0, start=0, end=5),
+        vnode=VNode("A", 10),
+    )
+    result = await strategy.preference_list(placement, snap, probe)
+    handoff_ids = [e.handoff for e in result if e.handoff is not None]
+    # A is suspect so it should get a handoff target from {C, D} (unseen candidates)
+    assert len(handoff_ids) >= 1
+
+
+@pytest.mark.ring
+async def test_placement_handoff_walk_skips_ghost_vnode_in_registry() -> None:
+    """_handoff_candidates skips vnodes whose node_id is absent from registry (logs WARNING)."""
+    import time
+
+    from tourillon.core.lifecycle.registry import MemberRegistry
+    from tourillon.core.ring.ring import Ring
+    from tourillon.core.ring.topology import Topology
+
+    ghost_vnode = VNode("ghost", 30)
+    real_a = _member("A", MemberPhase.READY, 10)
+    real_c = _member("C", MemberPhase.READY, 80)
+    registry = MemberRegistry()
+    registry.upsert(real_a)
+    registry.upsert(real_c)
+    ring = Ring([VNode("A", 10), ghost_vnode, VNode("C", 80)])
+    topology = Topology(epoch=0, registry=registry.snapshot(), ring=ring)
+
+    probe = ProbeManager()
+    # Make A suspect so _handoff_candidates is called
+    await probe.record_heartbeat("A")
+    await probe.record_heartbeat("A")
+    probe._detectors["A"]._last_arrival = time.monotonic() - 10000  # noqa: SLF001
+
+    strategy = SimplePreferenceStrategy(rf=1)
+    placement = PartitionPlacement(
+        partition=LogicalPartition(pid=0, start=0, end=5),
+        vnode=VNode("A", 10),
+    )
+    result = await strategy.preference_list(placement, topology, probe)
+    node_ids = [e.node_id for e in result]
+    # ghost is in ring but not registry → warning, skipped; C should be handoff
+    assert "ghost" not in node_ids
+
+
+@pytest.mark.ring
+async def test_placement_handoff_skips_excluded_phase_and_suspect_candidates() -> None:
+    """_handoff_candidates skips FAILED nodes (line 167) and suspect nodes (line 171)."""
+    import time
+
+    mgr = TopologyManager()
+    # A: READY, will be made suspect → primary that needs a handoff
+    await mgr.apply_member(_member("A", MemberPhase.READY, 10, seq=0))
+    # B: READY then FAILED → vnode stays in ring with phase=FAILED → line 167
+    await mgr.apply_member(_member("B", MemberPhase.READY, 30, seq=0))
+    await mgr.apply_member(_member("B", MemberPhase.FAILED, 30, seq=1))
+    # C: READY, will be made suspect → line 171 (suspect skip in handoff walk)
+    await mgr.apply_member(_member("C", MemberPhase.READY, 60, seq=0))
+    # D: READY, healthy → yields as handoff target
+    await mgr.apply_member(_member("D", MemberPhase.READY, 90, seq=0))
+
+    snap = await mgr.snapshot()
+    probe = ProbeManager()
+
+    # Make A suspect (needs handoff)
+    await probe.record_heartbeat("A")
+    await probe.record_heartbeat("A")
+    probe._detectors["A"]._last_arrival = time.monotonic() - 10000  # noqa: SLF001
+
+    # Make C suspect (should be skipped in handoff candidates walk)
+    await probe.record_heartbeat("C")
+    await probe.record_heartbeat("C")
+    probe._detectors["C"]._last_arrival = time.monotonic() - 10000  # noqa: SLF001
+
+    strategy = SimplePreferenceStrategy(rf=1)
+    placement = PartitionPlacement(
+        partition=LogicalPartition(pid=0, start=0, end=5),
+        vnode=VNode("A", 10),
+    )
+    result = await strategy.preference_list(placement, snap, probe)
+
+    # A is suspect + primary → has a handoff target
+    by_id = {e.node_id: e for e in result}
+    assert "A" in by_id
+    assert by_id["A"].suspect is True
+    # D should be the handoff target (B is FAILED→skipped, C is suspect→skipped)
+    assert by_id["A"].handoff == "D"

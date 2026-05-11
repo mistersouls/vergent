@@ -76,8 +76,8 @@ async def test_1_load_config_valid_returns_tourillonconfig(
     assert cfg.node_id == "node-1"
     assert cfg.node_size == NodeSize.M
     assert cfg.node_size.token_count == 4
-    assert cfg.kv_server.bind == "0.0.0.0:7700"
-    assert cfg.peer_server.bind == "0.0.0.0:7701"
+    assert cfg.kv_server.bind == "127.0.0.1:7700"
+    assert cfg.peer_server.bind == "127.0.0.1:7701"
     assert cfg.schema_version == 1
 
 

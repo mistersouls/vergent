@@ -28,12 +28,16 @@ class NodeState:
     Constructed exclusively by StatePort implementors and the bootstrap
     sequence; never built ad-hoc in domain code.
 
+    node_id is stored to allow the consistency check on restart: if the
+    state.toml belongs to a different node, startup must abort with code 1.
+
     tokens is empty for a fresh IDLE node and populated exactly once at the
     start of the join transition (IDLE → READY for the first node;
     IDLE → JOINING for seeded join). epoch is 0 before the first transition
     that advances it.
     """
 
+    node_id: str
     phase: MemberPhase
     generation: int
     seq: int

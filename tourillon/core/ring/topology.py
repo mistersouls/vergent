@@ -16,6 +16,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import struct
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from tourillon.core.lifecycle.member import Member, MemberPhase
@@ -77,6 +80,10 @@ class TopologyManager:
     Snapshot contract: snapshot() acquires the lock, builds an immutable
     Topology from MemberRegistry.snapshot() and the current Ring, releases
     the lock, then returns the frozen Topology.
+
+    member_fingerprint() is always read live from TopologyManager under its
+    lock; it is never stored on a Topology snapshot, which would become
+    immediately stale.
     """
 
     def __init__(self) -> None:
@@ -84,6 +91,8 @@ class TopologyManager:
         self._registry = MemberRegistry()
         self._ring = Ring.empty()
         self._epoch = 0
+        # Fingerprint cache; None means the cache is dirty.
+        self._fingerprint: str | None = None
 
     async def snapshot(self) -> Topology:
         """Return an immutable Topology snapshot acquired under the lock."""
@@ -103,22 +112,46 @@ class TopologyManager:
         async with self._lock:
             return self._apply(member)
 
-    async def merge_registry(self, registry: MemberRegistry) -> None:
-        """Merge an externally received MemberRegistry atomically.
+    async def merge_registry(self, members: Iterable[Member]) -> int:
+        """Apply each Member via _apply() and return the total count accepted.
 
-        Equivalent to calling apply_member for every entry in registry, but
-        performed under a single lock acquisition so that snapshots always
+        Performed under a single lock acquisition so that snapshots always
         reflect a fully merged state and never observe a partial merge.
+        Return value mirrors MemberRegistry.upsert() semantics: only records
+        that supersede the current version are counted. Used by the bootstrap
+        path and the gossip.delta handler.
+        """
+        accepted = 0
+        async with self._lock:
+            for member in members:
+                if self._apply(member):
+                    accepted += 1
+        return accepted
+
+    async def member_fingerprint(self) -> str:
+        """Return a SHA-256 fingerprint of the member registry.
+
+        The fingerprint is computed lazily and cached. It is invalidated on
+        every accepted mutation. GossipEngine always calls this method
+        immediately before building a gossip.ping payload, never reading it
+        from a Topology snapshot.
+
+        The algorithm is: for each member sorted alphabetically by node_id,
+        hash node_id_utf8 + uint64_be(generation) + uint64_be(seq).
+        epoch is intentionally excluded to avoid spurious full-member syncs
+        on ring mutations where no member record changed.
         """
         async with self._lock:
-            for member in registry:
-                self._apply(member)
+            if self._fingerprint is None:
+                self._fingerprint = self._compute_fingerprint()
+            return self._fingerprint
 
     def _apply(self, member: Member) -> bool:
         """Apply member under the already-held lock; return True if modified."""
         old = self._registry.get(member.node_id)
         if not self._registry.upsert(member):
             return False
+        self._fingerprint = None  # invalidate cache on any accepted mutation
         self._update_ring_and_epoch(old, member)
         return True
 
@@ -139,3 +172,11 @@ class TopologyManager:
             self._epoch += 1
         else:
             self._epoch += 1
+
+    def _compute_fingerprint(self) -> str:
+        """Compute the SHA-256 fingerprint of the member registry under the lock."""
+        digest = hashlib.sha256()
+        for member in sorted(self._registry, key=lambda m: m.node_id):
+            digest.update(member.node_id.encode("utf-8"))
+            digest.update(struct.pack(">QQ", member.generation, member.seq))
+        return digest.hexdigest()
