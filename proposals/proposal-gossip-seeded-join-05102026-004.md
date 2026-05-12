@@ -1,20 +1,16 @@
 # Proposal: Gossip Engine & Seeded Node Join
 
 **Author**: Souleymane BA <soulsmister@gmail.com>
-**Status:** Accepted — Incomplete (rebalance pending, see notice below)
+**Status:** Accepted — Completed by proposal 005
 **Date:** 2026-05-10
 **Sequence:** 004
 **Schema version:** 2
 
 ---
 
-> ⚠️ **Incomplete proposal.** The `JOINING → READY` transition requires
-> partition data transfer coordinated by the rebalance protocol. That portion
-> is **out of scope** for this proposal and will be specified in a dedicated
-> rebalance proposal. Until that proposal is accepted and implemented, a node
-> that completes gossip bootstrap remains in `JOINING` and does **not** advance
-> to `READY` automatically. Its peer server stays bound and accepts operator
-> commands; its KV server is not started.
+> ✅ **Completed by proposal 005.** The `JOINING → READY` transition requiring
+> partition data transfer is specified and implemented in
+> [proposal-rebalance-11052026-005](proposal-rebalance-11052026-005.md).
 
 ---
 

@@ -1,20 +1,36 @@
 # Proposal: Partition Rebalance
 
 **Author**: Souleymane BA <soulsmister@gmail.com>
-**Status:** Draft
+**Status:** Accepted
 **Date:** 2026-05-11
 **Sequence:** 005
 **Schema version:** 1
+**Continues:** proposal-gossip-seeded-join-05102026-004 (`JOINING → READY` deferred)
+
+---
+
+> **Continuation of proposal 004.** Proposal 004 (Gossip Engine & Seeded Node
+> Join) defined the `IDLE → JOINING` transition and explicitly deferred the
+> `JOINING → READY` transition to a dedicated rebalance proposal. This proposal
+> fulfils that commitment: it specifies and implements the full partition
+> rebalance protocol that drives a node from `JOINING → READY` (receiving
+> partitions) and from `DRAINING → IDLE` (sending partitions).
 
 ---
 
 ## Summary
 
-When cluster topology changes (a node joins or leaves), partitions must be
-redistributed across nodes according to the new ring state. This proposal
-defines how Tourillon performs that redistribution: a deterministic planner, a
-stateful applicator, a streaming wire protocol with crash-safe staging, and an
-operator-visible `tourctl rebalance status` command.
+This proposal is the direct continuation of proposal 004, which left a node
+in the `JOINING` phase after gossip bootstrap with no mechanism to advance to
+`READY`. The missing piece is partition data transfer: a `JOINING` node must
+receive all partitions it owns in the new ring before it can serve KV traffic;
+a `DRAINING` node must send all its partitions before it can leave.
+
+This proposal defines how Tourillon performs that redistribution: a
+deterministic planner, a stateful applicator, a streaming wire protocol with
+crash-safe staging, and an operator-visible `tourctl rebalance status` command.
+Completion of all transfers triggers the `JOINING → READY` or `DRAINING → IDLE`
+phase transition that proposal 004 explicitly deferred.
 
 The storage design in this proposal uses LMDB (two named DBIs: `DBI_INDEX` and
 `DBI_DATA`) as the **reference implementation**, chosen for its ACID guarantees,
@@ -30,11 +46,15 @@ or a future pluggable engine — is a valid candidate. LMDB-specific concepts
 
 ## Motivation
 
-Without a rebalance mechanism, a joining node owns ring partitions it has no
-data for, causing read misses. A leaving node still holds data that should
-belong to successors. This proposal closes that gap while guaranteeing no data
-loss on crash, no duplicate work on restart, and clean cancellation when
-topology changes again mid-transfer.
+Proposal 004 established that a node completing gossip bootstrap enters the
+`JOINING` phase with its vnodes in the ring but without any partition data.
+Without a rebalance mechanism, that node would remain stuck in `JOINING`
+indefinitely — owning ring partitions it has no data for, causing read misses,
+and never opening its KV socket. A leaving node faces the symmetric problem: it
+holds data that should belong to its successors but has no way to transfer it.
+This proposal closes that gap while guaranteeing no data loss on crash, no
+duplicate work on restart, and clean cancellation when topology changes again
+mid-transfer.
 
 ---
 
@@ -454,7 +474,7 @@ JOINING → READY     — all partition transfers committed
 JOINING → FAILED    — join aborted (e.g. transfers permanently fail after max retries)
 JOINING → PAUSED    — operator pause mid-join
 
-READY   → DRAINING  — operator-initiated leave (proposal 006)
+READY   → DRAINING  — operator-initiated leave (future proposal)
 READY   → PAUSED    — operator pause
 
 DRAINING → IDLE     — all partition transfers committed (leave complete)
@@ -725,7 +745,7 @@ See the [sequence diagrams](#sequence-diagrams) section below.
 
 See the [sequence diagrams](#sequence-diagrams) section below.
 
-1. Node transitions `READY → DRAINING` (proposal 006).
+1. Node transitions `READY → DRAINING` (future proposal).
 2. `planner.plan(ring_with_self, ring_without_self, epoch)` → plan.
 3. `applicator.apply(plan)` — for each transfer where `src == self`:
    a. Destination is identified; send `rebalance.plan {epoch, ranges
@@ -738,6 +758,42 @@ See the [sequence diagrams](#sequence-diagrams) section below.
    d. Destination accumulates digest; sends `rebalance.commit {epoch, pid, digest}`.
    e. Source validates delta digest; replies `rebalance.commit.ok`; marks pid as sent.
 4. `WaitGroup.wait()` → `DRAINING → IDLE`.
+
+### Phase transitions driven by the rebalance
+
+#### `JOINING → READY`
+
+This is the primary deliverable of this proposal with respect to proposal 004.
+The sequence after `WaitGroup.wait()` returns with an empty `failed_list`:
+
+1. **State persistence first**: write `state.toml` with `phase = READY`,
+   `committed_pids = [...]`, `staging_pids = []`. Phase is always persisted
+   before any network action (phase-persistence-before-gossip invariant).
+2. **KV socket open**: the bootstrap layer binds the KV TCP socket. The socket
+   is only opened at this point — never while the node is in `JOINING`
+   (KV-socket-lifecycle invariant).
+3. **Gossip**: the updated `MemberPhase.READY` record is emitted to peers so
+   they update their ring views and start routing KV traffic to this node.
+
+If `WaitGroup.wait()` returns with a non-empty `failed_list`, the node remains
+in `JOINING` and does **not** advance. No KV socket is opened. The operator
+must resolve the blocking transfers (see `tourctl rebalance status --blocked`)
+or a new gossip epoch must supersede the plan.
+
+#### `DRAINING → IDLE`
+
+The symmetric outcome of the DRAIN happy path. Once `WaitGroup.wait()` returns
+with an empty `failed_list` on a `DRAINING` node:
+
+1. **State persistence**: write `state.toml` with `phase = IDLE`.
+2. **KV socket close**: the KV socket (which was kept open for reads during
+   `DRAINING`) is closed.
+3. **Gossip**: `MemberPhase.IDLE` is emitted; peers remove this node's vnodes
+   from their active ring views.
+
+The operator action that triggers `READY → DRAINING` is defined in future proposal.
+This proposal only specifies the completion side: what happens when all
+DRAIN transfers are committed.
 
 ### Concurrent topology changes
 
