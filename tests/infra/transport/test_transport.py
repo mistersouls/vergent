@@ -265,3 +265,93 @@ async def test_20_response_timeout_raises_and_connection_stays_open() -> None:
         await client.close()
         srv.close()
         await srv.wait_closed()
+
+
+@pytest.mark.bootstrap
+async def test_21_server_side_streaming_receive_routes_same_cid_to_handler() -> None:
+    """Server routes same-cid follow-up envelopes to the running handler's queue.
+
+    A streaming handler calls receive() twice: the first call returns the initial
+    envelope; the second call should return a follow-up envelope sent by the client
+    on the same correlation_id via TcpClient.send(). Server-side streaming receive
+    must route it to the handler's queue rather than spawning a new handler.
+    """
+    second_received: list[bytes] = []
+
+    async def streaming_handler(receive, send) -> None:  # noqa: ANN001
+        env = await receive()
+        # Send an intermediate ack so the client knows it can send the second envelope.
+        await send(
+            Envelope(kind="ping.ack", payload=b"", correlation_id=env.correlation_id)
+        )
+        # Now await the follow-up envelope on the same correlation_id.
+        second = await receive()
+        second_received.append(second.payload)
+        await send(
+            Envelope(
+                kind="ping.done", payload=b"done", correlation_id=env.correlation_id
+            )
+        )
+
+    dispatcher = Dispatcher()
+    dispatcher.register("ping", streaming_handler)
+    srv, addr = await _start_server(dispatcher)
+
+    client = TcpClient()
+    received = []
+    try:
+        await client.connect(addr, tls_ctx=None)  # type: ignore[arg-type]
+        req = Envelope(kind="ping", payload=b"first")
+        async for env in client.stream(req, timeout=5.0):
+            received.append(env.kind)
+            if env.kind == "ping.ack":
+                # Fire-and-forget follow-up on the same correlation_id.
+                follow = Envelope(
+                    kind="ping",
+                    payload=b"second",
+                    correlation_id=req.correlation_id,
+                )
+                await client.send(follow)
+            if env.kind == "ping.done":
+                break
+    finally:
+        await client.close()
+        srv.close()
+        await srv.wait_closed()
+
+    assert "ping.ack" in received
+    assert "ping.done" in received
+    assert second_received == [b"second"]
+
+
+@pytest.mark.bootstrap
+async def test_22_client_send_fire_and_forget_no_response_expected() -> None:
+    """TcpClient.send() sends an envelope without registering any future or queue.
+
+    The server receives the envelope; the client does not hang waiting for a
+    response since no correlation_id is registered.
+    """
+    received_kinds: list[str] = []
+    done_event = asyncio.Event()
+
+    async def receiver(receive, send) -> None:  # noqa: ANN001
+        env = await receive()
+        received_kinds.append(env.kind)
+        done_event.set()
+
+    dispatcher = Dispatcher()
+    dispatcher.register("ff.msg", receiver)
+    srv, addr = await _start_server(dispatcher)
+
+    client = TcpClient()
+    try:
+        await client.connect(addr, tls_ctx=None)  # type: ignore[arg-type]
+        env = Envelope(kind="ff.msg", payload=b"fire")
+        await client.send(env)
+        await asyncio.wait_for(done_event.wait(), timeout=5.0)
+    finally:
+        await client.close()
+        srv.close()
+        await srv.wait_closed()
+
+    assert received_kinds == ["ff.msg"]

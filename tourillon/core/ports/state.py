@@ -40,7 +40,6 @@ class StatePort(Protocol):
 
     async def load(self) -> NodeState | None:
         """Return the persisted NodeState, or None if no state file exists."""
-        ...
 
     async def save(self, state: NodeState) -> None:
         """Atomically persist state to disk.
@@ -48,4 +47,3 @@ class StatePort(Protocol):
         Raise StateError on any I/O failure (permissions, filesystem full,
         decode error). Never raises on a clean write.
         """
-        ...

@@ -147,8 +147,21 @@ class TcpClient:
         finally:
             self._streams.pop(key, None)
 
+    async def send(self, env: Envelope) -> None:
+        """Send *env* without registering any response handler (fire-and-forget).
+
+        Use this to push rebalance.transfer chunks or a rebalance.commit back to
+        the peer on a correlation_id already open via a concurrent stream() call.
+        The caller is responsible for consuming any response envelopes via the
+        active stream() queue on that correlation_id.
+
+        Raise ConnectionClosedError when the connection is already closed.
+        """
+        if self._closed or self._writer is None:
+            raise ConnectionClosedError()
+        await self._send(env)
+
     async def close(self) -> None:
-        """Close the connection; all pending callers receive ConnectionClosedError."""
         if self._closed:
             return
         self._closed = True

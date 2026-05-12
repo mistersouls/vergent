@@ -19,12 +19,12 @@ and future codecs (e.g. a JSON debug adapter) can be swapped per connection
 without modifying any business logic.
 """
 
-from __future__ import annotations  # pragma: no cover
+from __future__ import annotations
 
-from typing import Any, Protocol  # pragma: no cover
+from typing import Any, Protocol
 
 
-class SerializerPort(Protocol):  # pragma: no cover
+class SerializerPort(Protocol):
     """Payload codec used to encode and decode Envelope payloads.
 
     Implementors must declare schema_id so that the transport layer can embed

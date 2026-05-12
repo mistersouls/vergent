@@ -107,6 +107,7 @@ def _parse_state(raw: dict[str, Any]) -> NodeState:
     try:
         node = raw["node"]
         topo: dict[str, Any] = raw.get("topology", {})
+        reb: dict[str, Any] = raw.get("rebalance", {})
         return NodeState(
             node_id=str(node.get("node_id", "")),
             phase=MemberPhase(node["phase"]),
@@ -114,6 +115,8 @@ def _parse_state(raw: dict[str, Any]) -> NodeState:
             seq=int(node["seq"]),
             tokens=tuple(int(t) for t in node.get("tokens", [])),
             epoch=int(topo.get("epoch", 0)),
+            committed_pids=tuple(int(p) for p in reb.get("committed_pids", [])),
+            staging_pids=tuple(int(p) for p in reb.get("staging_pids", [])),
         )
     except Exception as exc:
         raise StateError(f"Malformed state.toml: {exc}") from exc
@@ -131,6 +134,10 @@ def _encode_state(state: NodeState) -> dict[str, Any]:
         },
         "topology": {
             "epoch": state.epoch,
+        },
+        "rebalance": {
+            "committed_pids": list(state.committed_pids),
+            "staging_pids": list(state.staging_pids),
         },
     }
 

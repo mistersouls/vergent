@@ -99,4 +99,3 @@ class ConnectionHandler(Protocol):
         send: SendEnvelope,
     ) -> None:
         """Process one request and emit response Envelope(s)."""
-        ...

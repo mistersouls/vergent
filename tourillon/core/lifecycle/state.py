@@ -43,3 +43,5 @@ class NodeState:
     seq: int
     tokens: tuple[int, ...]  # empty for IDLE; populated at join transition
     epoch: int  # topology version from [topology].epoch
+    committed_pids: tuple[int, ...] = ()  # pids fully committed in [rebalance]
+    staging_pids: tuple[int, ...] = ()  # pids with in-progress staging in [rebalance]

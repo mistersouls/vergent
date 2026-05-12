@@ -602,9 +602,6 @@ and overwriting it with a bulk transfer could regress it to an older version.
 - `|cluster| < rf` and source draining → `entering = ∅` → empty plan; the
   surviving nodes already cover all available replication slots.
 
-**`Ring.successors(token, n)` method** (added to `Ring`): returns the first
-`n` vnodes clockwise after `token`, skipping duplicate `node_id`s to respect
-the "distinct physical nodes" invariant of replication.
 
 ### Concrete rf scenarios
 
@@ -1340,7 +1337,6 @@ Vnode expiration is out of scope.
 ## Proposed code organisation
 
 ```
-tourillon/core/ring/ring.py              — add Ring.successors(token, n)
 tourillon/core/structure/clock.py       — HLCTimestamp, HLCClock
 tourillon/core/structure/record.py      — StoreKey, Version, Tombstone,
                                            record_from_dict

@@ -59,7 +59,9 @@ class _ConnectionSession:
         self._max_payload = max_payload
         self._peer = writer.get_extra_info("peername", default="unknown")
         self._write_lock = asyncio.Lock()
-        self._in_flight: set[bytes] = set()
+        # correlation_id bytes → receive queue for a running handler.
+        # Presence in this dict also serves as the in-flight membership check.
+        self._in_flight: dict[bytes, asyncio.Queue[Envelope]] = {}
         self._handler_tasks: set[asyncio.Task[None]] = set()
 
     async def run(self) -> None:
@@ -97,6 +99,16 @@ class _ConnectionSession:
             if env is None:
                 break
 
+            logger.debug(
+                "← %s  cid=%.8s  peer=%s", env.kind, env.correlation_id, self._peer
+            )
+
+            # Route to an already-running streaming handler when cid matches.
+            cid_key = env.correlation_id.bytes
+            if cid_key in self._in_flight:
+                await self._in_flight[cid_key].put(env)
+                continue
+
             handler = self._dispatcher.lookup(env.kind)
             if handler is None:
                 logger.debug(
@@ -106,9 +118,6 @@ class _ConnectionSession:
                 )
                 break
 
-            logger.debug(
-                "← %s  cid=%.8s  peer=%s", env.kind, env.correlation_id, self._peer
-            )
             self._spawn_handler(env, handler)
 
     async def _read_next(self) -> Envelope | None:
@@ -130,20 +139,23 @@ class _ConnectionSession:
 
     def _spawn_handler(self, env: Envelope, handler: Callable) -> None:  # noqa: ANN001
         """Create a task for *handler* and track it for clean cancellation."""
-        self._in_flight.add(env.correlation_id.bytes)
+        cid_key = env.correlation_id.bytes
+        queue: asyncio.Queue[Envelope] = asyncio.Queue()
+        queue.put_nowait(env)
+        self._in_flight[cid_key] = queue
         task: asyncio.Task[None] = asyncio.get_running_loop().create_task(
-            self._run_handler(env, handler)
+            self._run_handler(env, handler, queue)
         )
         self._handler_tasks.add(task)
         task.add_done_callback(self._handler_tasks.discard)
 
     async def _run_handler(
-        self, env: Envelope, handler: Callable
+        self, env: Envelope, handler: Callable, queue: asyncio.Queue[Envelope]
     ) -> None:  # noqa: ANN001
         """Invoke *handler* then remove *env* from in-flight tracking."""
 
         async def receive() -> Envelope:
-            return env
+            return await queue.get()
 
         try:
             await handler(receive, self.send)
@@ -156,7 +168,7 @@ class _ConnectionSession:
                 self._peer,
             )
         finally:
-            self._in_flight.discard(env.correlation_id.bytes)
+            self._in_flight.pop(env.correlation_id.bytes, None)
 
     async def _close(self) -> None:
         """Cancel all handler tasks and close the writer."""

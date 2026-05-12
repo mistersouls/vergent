@@ -34,4 +34,3 @@ class ConsolePort(Protocol):
 
     def print(self, *args: Any, **kwargs: Any) -> None:
         """Emit one line of output to this console."""
-        ...

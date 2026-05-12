@@ -27,6 +27,7 @@ from typing import Annotated
 import typer
 
 from tourillon.bootstrap.config import ConfigError, load_config_file
+from tourillon.bootstrap.container import build_node_container
 from tourillon.bootstrap.lock import PidLock
 from tourillon.bootstrap.log import setup_logging
 from tourillon.core.gossip.bootstrapper import (
@@ -56,14 +57,9 @@ from tourillon.core.ring.partitioner import Partitioner
 from tourillon.core.ring.topology import TopologyManager
 from tourillon.core.structure.config import NodeSize, TourillonConfig
 from tourillon.core.transport.dispatcher import Dispatcher
-from tourillon.core.transport.pool import PeerClientPool
 from tourillon.core.transport.server import TcpServer
 from tourillon.infra.serializer.msgpack import MsgpackSerializerAdapter
 from tourillon.infra.store.state import FileStateAdapter
-from tourillon.infra.tls.context import (
-    build_client_ssl_context,
-    build_server_ssl_context,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -351,14 +347,7 @@ async def _run_phase(
     topology_mgr = TopologyManager()
     probe_mgr = ProbeManager()
     partitioner = Partitioner(hash_space, cfg.partition_shift)
-    serializer = MsgpackSerializerAdapter()
-
-    ssl_ctx = build_server_ssl_context(
-        cfg.tls.cert_data, cfg.tls.key_data, cfg.tls.ca_data
-    )
-    client_ssl_ctx = build_client_ssl_context(
-        cfg.tls.cert_data, cfg.tls.key_data, cfg.tls.ca_data
-    )
+    container = build_node_container(cfg)
 
     peer_address = cfg.peer_server.advertise or cfg.peer_server.bind
     kv_address = cfg.kv_server.advertise or cfg.kv_server.bind
@@ -378,14 +367,13 @@ async def _run_phase(
     state_ref: list[NodeState] = [effective]
     gossip_config = GossipConfig()
 
-    pool = PeerClientPool(ssl_ctx=client_ssl_ctx)
     engine = GossipEngine(
         node_id=cfg.node_id,
         topology_manager=topology_mgr,
-        pool=pool,
+        pool=container.pool,
         config=gossip_config,
         partition_shift=cfg.partition_shift,
-        serializer=serializer,
+        serializer=container.serializer,
     )
     # Bind on_failed after construction to capture the live engine reference.
     engine._on_failed = functools.partial(  # type: ignore[attr-defined]
@@ -404,8 +392,8 @@ async def _run_phase(
         cfg,
         topology_mgr,
         gossip_config,
-        client_ssl_ctx,
-        serializer,
+        container.client_ssl_ctx,
+        container.serializer,
         engine,
         phase,
         stop,
@@ -420,8 +408,8 @@ async def _run_phase(
         topology_mgr=topology_mgr,
         probe_mgr=probe_mgr,
         partitioner=partitioner,
-        client_ssl_ctx=client_ssl_ctx,
-        serializer=serializer,
+        client_ssl_ctx=container.client_ssl_ctx,
+        serializer=container.serializer,
         engine=engine,
         gossip_config=gossip_config,
         launch_bootstrap=launch_bootstrap,
@@ -432,8 +420,8 @@ async def _run_phase(
     peer_host, peer_port = _parse_bind(cfg.peer_server.bind)
     kv_host, kv_port = _parse_bind(cfg.kv_server.bind)
 
-    peer_server = TcpServer(peer_dispatcher, ssl_ctx, name="Peer")
-    kv_server = TcpServer(Dispatcher(), ssl_ctx, name="KV")
+    peer_server = TcpServer(peer_dispatcher, container.server_ssl_ctx, name="Peer")
+    kv_server = TcpServer(Dispatcher(), container.server_ssl_ctx, name="KV")
 
     await peer_server.start(peer_host, peer_port)
 
@@ -449,8 +437,8 @@ async def _run_phase(
         effective,
         state_port,
         topology_mgr,
-        client_ssl_ctx,
-        serializer,
+        container.client_ssl_ctx,
+        container.serializer,
         state_ref,
         gossip_config,
         engine,
@@ -470,7 +458,7 @@ async def _run_phase(
     await peer_server.stop()
     if bind_kv:
         await kv_server.stop()
-    await pool.close_all()
+    await container.pool.close_all()
     logger.info("Node %r stopped cleanly.", cfg.node_id)
 
 

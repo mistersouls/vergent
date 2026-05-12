@@ -88,6 +88,14 @@ class DrainConfig:
 
 
 @dataclass(frozen=True)
+class RebalanceConfig:
+    """Operator-tunable parameters for the rebalance engine."""
+
+    max_concurrent_transfers: int = 4  # max parallel in-flight transfers
+    max_chunk_bytes: int = 1_048_576  # 1 MiB per transfer chunk
+
+
+@dataclass(frozen=True)
 class TourillonConfig:
     """Fully-validated, immutable node configuration.
 
@@ -111,4 +119,5 @@ class TourillonConfig:
     partition_shift: int = 10  # immutable after cluster bootstrap
     join: JoinConfig = field(default_factory=JoinConfig)
     drain: DrainConfig = field(default_factory=DrainConfig)
+    rebalance: RebalanceConfig = field(default_factory=RebalanceConfig)
     schema_version: int = 1

@@ -88,5 +88,15 @@ markers = [
   "inspect: proposal 003 — node inspect command",
   "gossip: proposal 004 — gossip engine and seeded join",
   "lifecycle: proposal 002/004 — member phase FSM and probe manager",
+  "rebalance: proposal 005 — partition rebalance",
   "e2e: end-to-end tests requiring real sockets",
+]
+
+# ---------------------------------------------------------------------------
+# Coverage
+# ---------------------------------------------------------------------------
+[tool.coverage.run]
+omit = [
+  # In-memory test helpers live in core/testing/ but are not production code.
+  "tourillon/core/testing/*",
 ]
