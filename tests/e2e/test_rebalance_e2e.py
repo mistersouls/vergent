@@ -777,6 +777,7 @@ async def test_e2e_rebalance_status_transfer_entries_have_src_and_dst(
             7: TransferHandle(
                 PartitionTransfer(7, "src-node", "node-1"),
                 TransferState.COMMITTED,
+                bytes_done=1,
             ),
         }
 

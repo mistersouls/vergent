@@ -926,8 +926,18 @@ async def _startup_ready(
     cfg: TourillonConfig,
     state: NodeState,
     topology_mgr: TopologyManager,
+    gossip_config: GossipConfig,
+    client_ssl_ctx: object,
+    serializer: object,
 ) -> bool:
-    """Handle READY phase startup; return True (engine always started)."""
+    """Handle READY phase startup; return True (engine always started).
+
+    When ``cfg.seeds`` is non-empty, runs the unconditional gossip bootstrap
+    (empty ``gossip.digest``) against every configured seed so that the
+    restarted node re-learns the full cluster membership it lost across the
+    restart. Without this, the local registry contains only the local node
+    and the AE loop has no eligible peers to converge with.
+    """
     member = Member(
         node_id=cfg.node_id,
         peer_address=_peer_address(cfg),
@@ -938,6 +948,13 @@ async def _startup_ready(
         partition_shift=cfg.partition_shift,
     )
     await topology_mgr.apply_member(member)
+    if cfg.seeds:
+        await _run_seeded_bootstrap(
+            cfg, topology_mgr, gossip_config, client_ssl_ctx, serializer
+        )
+        # Re-register the local member after merging seed deltas to make sure
+        # the post-bootstrap registry still carries this node's own record.
+        await topology_mgr.apply_member(member)
     logger.info(
         "Node %r is ready (epoch %d, generation %d).",
         cfg.node_id,
@@ -1083,7 +1100,9 @@ async def _startup_phase_logic(
     if phase == MemberPhase.IDLE:
         return await _startup_idle(cfg, state_port, topology_mgr, state_ref)
     if phase == MemberPhase.READY:
-        return await _startup_ready(cfg, state, topology_mgr)
+        return await _startup_ready(
+            cfg, state, topology_mgr, gossip_config, client_ssl_ctx, serializer
+        )
     if phase in _BOOTSTRAP_PHASES:
         return await _startup_bootstrap_phase(
             cfg,

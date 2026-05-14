@@ -296,11 +296,17 @@ class GossipDigestHandler:
             )
 
         topo = await self._topology_manager.snapshot()
+        local_ids = {m.node_id for m in topo.registry}
         ahead: list[dict[str, Any]] = []
         for member in sorted(topo.registry, key=lambda m: m.node_id):
             peer_ver = peer_versions.get(member.node_id)
             if peer_ver is None or (member.generation, member.seq) > peer_ver:
                 ahead.append(_member_to_dict(member))
+
+        # Symmetric AE: tell the initiator which node_ids it knows about but
+        # we do not, so it can send them back via gossip.push. This closes
+        # the convergence loop for a peer that lost its registry on restart.
+        wanted = sorted(nid for nid in peer_versions if nid not in local_ids)
 
         # Send a single delta page (pagination left for future extension).
         delta_payload = self._serializer.encode(
@@ -308,6 +314,7 @@ class GossipDigestHandler:
                 "sender": self._node_id,
                 "has_more": False,
                 "members": ahead,
+                "wanted": wanted,
             }
         )
         delta_env = Envelope.create(

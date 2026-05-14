@@ -313,31 +313,22 @@ class GossipEngine:
             logger.warning("gossip.ping to %s failed: %s.", peer.node_id, exc)
 
     async def _ae_digest_delta(self, peer: Member, client: object) -> None:
-        """Send gossip.digest and merge the received delta."""
+        """Send gossip.digest, merge the received delta, satisfy peer's `wanted`.
+
+        After merging every delta page the initiator inspects each `wanted`
+        list returned by the responder and sends a single `gossip.push` back
+        carrying every local Member whose node_id appears there. This closes
+        the convergence loop symmetrically: each side learns whatever the
+        other was missing, in one round-trip per AE cycle.
+        """
         if self._serializer is None:
             return
         from tourillon.core.transport.client import TcpClient
 
         assert isinstance(client, TcpClient)
         try:
-            topo = await self._topology_manager.snapshot()
-            digest_members = [
-                {"node_id": m.node_id, "generation": m.generation, "seq": m.seq}
-                for m in sorted(topo.registry, key=lambda m: m.node_id)
-            ]
-            digest_payload = self._serializer.encode(  # type: ignore[union-attr]
-                {
-                    "sender": self._node_id,
-                    "has_more": False,
-                    "after_node_id": "",
-                    "members": digest_members,
-                }
-            )
-            digest_env = Envelope.create(
-                digest_payload,
-                kind="gossip.digest",
-                schema_id=self._serializer.schema_id,  # type: ignore[union-attr]
-            )
+            digest_env = await self._build_digest_envelope()
+            wanted: set[str] = set()
             async for delta_env in client.stream(digest_env):
                 if delta_env.kind == "gossip.error":
                     await self._handle_ae_error(delta_env)
@@ -345,10 +336,73 @@ class GossipEngine:
                 if delta_env.kind == "gossip.delta":
                     await self._merge_delta(delta_env, peer.node_id)
                     data = self._serializer.decode(delta_env.payload)  # type: ignore[union-attr]
+                    wanted.update(data.get("wanted", []) or [])
                     if not data.get("has_more", False):
                         break
+            if wanted:
+                await self._satisfy_wanted(peer, client, wanted)
         except (OSError, ResponseTimeoutError, ConnectionClosedError) as exc:
             logger.warning("AE digest/delta with %s failed: %s.", peer.node_id, exc)
+
+    async def _build_digest_envelope(self) -> Envelope:
+        """Build the initiator-side gossip.digest envelope from local registry."""
+        topo = await self._topology_manager.snapshot()
+        digest_members = [
+            {"node_id": m.node_id, "generation": m.generation, "seq": m.seq}
+            for m in sorted(topo.registry, key=lambda m: m.node_id)
+        ]
+        payload = self._serializer.encode(  # type: ignore[union-attr]
+            {
+                "sender": self._node_id,
+                "has_more": False,
+                "after_node_id": "",
+                "members": digest_members,
+            }
+        )
+        return Envelope.create(
+            payload,
+            kind="gossip.digest",
+            schema_id=self._serializer.schema_id,  # type: ignore[union-attr]
+        )
+
+    async def _satisfy_wanted(
+        self,
+        peer: Member,
+        client: object,
+        wanted: set[str],
+    ) -> None:
+        """Push to *peer* every local Member whose node_id appears in *wanted*.
+
+        Errors are best-effort: a failure to push back leaves the next AE
+        cycle to retry; logged at DEBUG.
+        """
+        if self._serializer is None:
+            return
+        from tourillon.core.transport.client import TcpClient
+
+        assert isinstance(client, TcpClient)
+        topo = await self._topology_manager.snapshot()
+        to_send = [m for m in topo.registry if m.node_id in wanted]
+        if not to_send:
+            return
+        try:
+            payload = self._serializer.encode(  # type: ignore[union-attr]
+                {
+                    "sender": self._node_id,
+                    "ttl": 1,
+                    "members": [_member_to_dict(m) for m in to_send],
+                }
+            )
+            env = Envelope.create(
+                payload,
+                kind="gossip.push",
+                schema_id=self._serializer.schema_id,  # type: ignore[union-attr]
+            )
+            resp = await client.request(env)
+            if resp.kind == "gossip.push.ok":
+                self.stats.push_sent_total += 1
+        except (OSError, ResponseTimeoutError, ConnectionClosedError) as exc:
+            logger.debug("AE wanted-push to %s failed: %s.", peer.node_id, exc)
 
     async def _merge_delta(self, delta_env: Envelope, peer_node_id: str) -> None:
         """Merge a gossip.delta envelope into the local registry.

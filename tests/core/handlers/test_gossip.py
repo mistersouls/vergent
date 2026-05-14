@@ -405,3 +405,57 @@ async def test_register_gossip_handlers_registers_all_three() -> None:
     assert dispatcher._handlers.get("gossip.push") is not None  # type: ignore[attr-defined]
     assert dispatcher._handlers.get("gossip.ping") is not None  # type: ignore[attr-defined]
     assert dispatcher._handlers.get("gossip.digest") is not None  # type: ignore[attr-defined]
+
+
+@pytest.mark.gossip
+async def test_digest_handler_reports_wanted_for_missing_node_ids() -> None:
+    """Digest handler advertises wanted=[node_ids] for entries it does not know about."""
+    serializer = MsgpackSerializerAdapter()
+    topology_mgr = TopologyManager()
+
+    # Local only knows node-self; peer's digest mentions node-A and node-B.
+    await topology_mgr.apply_member(_make_member("node-self", seq=10))
+
+    handler = GossipDigestHandler(
+        "node-self", topology_mgr, max_digest_entries=4096, serializer=serializer
+    )
+
+    entries = [
+        {"node_id": "node-self", "generation": 1, "seq": 10},
+        {"node_id": "node-A", "generation": 1, "seq": 5},
+        {"node_id": "node-B", "generation": 2, "seq": 0},
+    ]
+    payload = serializer.encode(
+        {"sender": "node-A", "has_more": False, "after_node_id": "", "members": entries}
+    )
+    sent = await _invoke_handler(handler, payload, "gossip.digest")
+
+    assert len(sent) == 1
+    assert sent[0].kind == "gossip.delta"
+    data = serializer.decode(sent[0].payload)
+    assert data["members"] == []  # nothing local that peer is missing
+    assert sorted(data["wanted"]) == ["node-A", "node-B"]
+
+
+@pytest.mark.gossip
+async def test_digest_handler_wanted_empty_when_registries_identical() -> None:
+    """Digest handler returns wanted=[] when peer's digest mentions no unknown node_ids."""
+    serializer = MsgpackSerializerAdapter()
+    topology_mgr = TopologyManager()
+    await topology_mgr.apply_member(_make_member("node-1", seq=10))
+    await topology_mgr.apply_member(_make_member("node-2", seq=20))
+
+    handler = GossipDigestHandler(
+        "node-1", topology_mgr, max_digest_entries=4096, serializer=serializer
+    )
+    entries = [
+        {"node_id": "node-1", "generation": 1, "seq": 10},
+        {"node_id": "node-2", "generation": 1, "seq": 20},
+    ]
+    payload = serializer.encode(
+        {"sender": "node-2", "has_more": False, "after_node_id": "", "members": entries}
+    )
+    sent = await _invoke_handler(handler, payload, "gossip.digest")
+
+    data = serializer.decode(sent[0].payload)
+    assert data["wanted"] == []

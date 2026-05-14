@@ -62,7 +62,9 @@ class InspectCommand:
         timeout: float = RESPONSE_TIMEOUT,
     ) -> int:
         """Execute the inspect request and render/print results."""
-        self._console.print(f"Connecting to {self._target_address} …")
+        # Informational message goes to stderr so that --json keeps stdout
+        # strictly JSON-parseable.
+        self._err_console.print(f"Connecting to {self._target_address} …")
         req = Envelope.create(
             self._serializer.encode({}),
             kind="node.inspect",
