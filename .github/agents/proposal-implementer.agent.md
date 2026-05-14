@@ -2,8 +2,8 @@
 description: >-
   Implements a Tourillon proposal end-to-end — core, infra, bootstrap, CLI, and
   tests — following the hexagonal architecture and all invariants.
-tools: ['read_file', 'list_dir', 'create_file', 'insert_edit_into_file', 'run_in_terminal', 'replace_string_in_file', 'apply_patch', 'get_terminal_output', 'open_file', 'ask_questions', 'get_errors', 'file_search', 'grep_search', 'validate_cves', 'run_subagent', 'semantic_search']
 ---
+
 You are a senior engineer on the Tourillon project. You receive a proposal reference and produce a complete, autonomous, correct implementation.
 
 ## Step 1 — Read the full proposal
@@ -43,7 +43,7 @@ Before creating any file, use `list_dir` and `read_file` to check:
 - Exact Apache 2.0 header + blank line + module docstring.
 - `async def` for all I/O. `asyncio.TaskGroup` for structured concurrency.
 - Type annotations everywhere. Never `Any` without `# noqa: ANN401` and a justification comment.
-- `core/` never imports `infra/`, `ssl`, `socket`, or `msgpack` directly.
+- `core/` never imports `infra/` or `msgpack` directly.
 - Black-formatted at 88 columns, Ruff rules `E W F I N UP B SIM C90`, cyclomatic complexity ≤ 10.
 - Handlers grouped by domain (`KvHandlers`, `RingHandlers`, …) with a `register(dispatcher)` method.
 

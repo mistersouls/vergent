@@ -4,7 +4,7 @@
 **Status:** Accepted
 **Date:** 2026-05-11
 **Sequence:** 005
-**Schema version:** 1
+**Revision:** 2
 **Continues:** proposal-gossip-seeded-join-05102026-004 (`JOINING → READY` deferred)
 
 ---
@@ -60,24 +60,39 @@ mid-transfer.
 
 ## CLI contract
 
-### `tourctl rebalance status [--node <addr>] [--after-pid <n>] [--limit <n>] [--blocked] [--json]`
+### `tourctl rebalance status <addr> [--after-pid <n>] [--limit <n>] [--blocked] [--json]`
 
-Queries the rebalance status of the node at the active context's peer endpoint
-(or the address specified by `--node`). Paginated by default (`--limit 500`):
+Queries the rebalance status of the node at `<addr>` (the target's peer
+address, e.g. `10.0.0.2:7701`). `tourctl` opens a direct mTLS connection
+straight to `<addr>` and sends the request — no contact node, no forwarding.
+The address is mandatory — there is no
+implicit fallback to the active context's peer endpoint. Paginated by default
+(`--limit 500`):
 pass `--after-pid` and `--limit` for clusters with large partition counts.
 With `pshift=17` (131 072 partitions) pagination is **required** — do not
 attempt to render all partitions in a single call.
 
 **Active vs inactive partitions**: a partition is *active* when it has a
-`TransferHandle` (states PENDING, RUNNING, COMMITTED, FAILED, CANCELLED). A
-partition is *inactive* when it exists in the ring topology but has no records
-to transfer (0 bytes — common in small clusters where most partitions are empty).
-Inactive partitions do not appear in the table.
+`TransferHandle` **and** either (a) is in a non-terminal state (PENDING,
+RUNNING), or (b) is in a terminal state other than an empty commit
+(FAILED, CANCELLED, or COMMITTED with `bytes_done > 0`). A partition is
+*inactive* when it falls into one of two categories:
+
+1. **No TransferHandle** — it exists in the ring topology but was
+   never enrolled in a transfer plan (possible only when `total_partitions`
+   is supplied and exceeds the number of planned handles).
+2. **Empty committed** — it has a COMMITTED `TransferHandle` with
+   `bytes_done == 0`, meaning the partition was planned and the transfer
+   completed successfully but contained no records (common in small
+   clusters where most partitions are empty).
+
+Inactive partitions do not appear in the table and do not count toward
+`active_partitions` in the Summary line.
 
 **Node in JOINING (destination — receiving partitions):**
 
 ```
-$ tourctl rebalance status
+$ tourctl rebalance status 10.0.0.3:7701
 
 Rebalance status — node-3  (epoch 4, JOINING → READY)
 Role: receiving
@@ -95,7 +110,7 @@ Summary: 50 active partitions (48 committed, 1 running, 1 failed)
 **Node in DRAINING (source — sending partitions):**
 
 ```
-$ tourctl rebalance status
+$ tourctl rebalance status 10.0.0.2:7701
 
 Rebalance status — node-2  (epoch 4, DRAINING → IDLE)
 Role: sending
@@ -113,7 +128,7 @@ Summary: 50 active partitions (48 committed, 2 running, 0 failed)
 **Node BLOCKED (one or more FAILED transfers):**
 
 ```
-$ tourctl rebalance status --blocked
+$ tourctl rebalance status 10.0.0.3:7701 --blocked
 
 Rebalance status — node-3  (epoch 4, JOINING → READY)
 State: BLOCKED
@@ -138,6 +153,7 @@ hint block. Exit code 2 when the node is BLOCKED (in addition to the normal 0
 **No active rebalance:**
 
 ```
+$ tourctl rebalance status 10.0.0.1:7701
 No active rebalance on node-1.
 ```
 
@@ -777,7 +793,7 @@ The sequence after `WaitGroup.wait()` returns with an empty `failed_list`:
 
 If `WaitGroup.wait()` returns with a non-empty `failed_list`, the node remains
 in `JOINING` and does **not** advance. No KV socket is opened. The operator
-must resolve the blocking transfers (see `tourctl rebalance status --blocked`)
+must resolve the blocking transfers (see `tourctl rebalance status <addr> --blocked`)
 or a new gossip epoch must supersede the plan.
 
 #### `DRAINING → IDLE`
@@ -1573,7 +1589,7 @@ All scenarios use in-memory adapters unless marked `[e2e]`.
 - [ ] All test scenarios pass (`uv run pytest -m rebalance -x`).
 - [ ] `uv run pytest --cov-fail-under=90` passes.
 - [ ] `uv run pre-commit run --all-files` passes.
-- [ ] `tourctl rebalance status` renders correctly for both JOINING and DRAINING nodes.
+- [ ] `tourctl rebalance status <addr>` renders correctly for both JOINING and DRAINING nodes.
 - [ ] `NodeState.committed_pids` / `staging_pids` survive a round-trip through `FileStateAdapter`.
 - [ ] `Version` and `Tombstone` round-trip losslessly through `record_from_dict(record.to_dict())`.
 - [ ] `compute_transfer_digest` produces identical output for identical record sequences regardless of call site.

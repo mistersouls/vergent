@@ -4,21 +4,19 @@
 **Status:** Accepted
 **Date:** 2026-05-10
 **Sequence:** 003
-**Schema version:** 1
+**Revision:** 2
 
 ---
 
 ## Summary
 
-`tourctl node inspect <node-id>` retrieves a rich, live snapshot of a cluster
+`tourctl node inspect <address>` retrieves a rich, live snapshot of a cluster
 node's identity, ring position, partition ownership, cluster membership view,
-and failure-detector state. The request is sent to the contact node's peer
-endpoint over mTLS; if the contact is not the target, it transparently proxies
-the request to the target's peer address and relays the response. The target
-node always builds and returns the response itself — no other node constructs
-it on the target's behalf. A separate `--peer-view` flag lets the operator
-query the contact node's gossip record for the target instead of reaching the
-target directly, which is useful for debugging an unreachable node.
+and failure-detector state. The operator supplies the target node's **peer
+address** (e.g. `peer-3.prod.example.com:7701`) directly. `tourctl` opens a
+mTLS connection straight to that address and sends a self-inspect request. The
+target node builds and returns the response entirely from its own state —
+no intermediary, no forwarding.
 
 ---
 
@@ -30,38 +28,25 @@ stale gossip, and understand partition ownership. Without a dedicated inspect
 command the only available signal is the daemon log, which requires direct
 machine access and provides no structured overview.
 
-Two distinct information needs exist:
-
-1. **Live node state** — what the node itself reports: its full lifecycle phase,
-   exact token placement on the ring, every partition range it owns, its
-   complete view of cluster membership, and the local phi-accrual probe state
-   for every peer. This is the primary mode and is always answered by the
-   target node.
-
-2. **Gossip view** — what a peer reports about the target: its cached `Member`
-   record (phase, generation, seq, tokens) and its local probe state for the
-   target. This mode is used when the target is unreachable and its peer
-   endpoint refuses connections, or when an operator wants to compare two
-   nodes' views of a third.
-
-The forwarding mechanism is necessary because `tourctl` typically connects to a
-single well-known peer endpoint (from `contexts.toml`). It cannot be expected
-to know or have firewall access to every node's peer address. The contact node
-handles the routing transparently.
+The primary information need is **live node state** — what the node itself
+reports: its full lifecycle phase, exact token placement on the ring, every
+partition range it owns, its complete view of cluster membership, and the local
+phi-accrual probe state for every peer. `tourctl` connects directly to the
+target's peer address over mTLS; no intermediary contact node is involved.
 
 ---
 
 ## CLI contract
 
-### `tourctl node inspect <node-id>`
+### `tourctl node inspect <address>`
 
-Contacts the peer endpoint in the active context, sends a `node.inspect`
-request for `<node-id>`, waits for the response (from the target, proxied
-through the contact if needed), and renders a structured summary.
+Opens a direct mTLS connection to `<address>` (the target's peer address, e.g.
+`peer-3.prod.example.com:7701`), sends a `node.inspect` self-inspect request,
+and renders a structured summary.
 
 ```
-$ tourctl node inspect node-3
-Inspecting node-3 (via node-1) ...
+$ tourctl node inspect peer-3.prod.example.com:7701
+Inspecting peer-3.prod.example.com:7701 (node-3) ...
 
   Identity
     Node ID:      node-3
@@ -94,8 +79,8 @@ Inspecting node-3 (via node-1) ...
     node-2   LIVE
 ```
 
-When the contact node (node-1) is also the target (`node-id == contact node`),
-the request is answered locally without any forwarding.
+The header line reads `(node-id)` using the `node_id` field returned in the
+response payload (self-reported by the target).
 
 #### `--timeout <duration>`
 
@@ -105,14 +90,13 @@ same format as duration config fields (`10s`, `5.5s`, …). Default:
 
 #### `--json`
 
-Emit the raw `NodeInspectResponse` (or `NodePeerViewResponse` when combined
-with `--peer-view`) as pretty-printed JSON to stdout instead of the Rich table.
-All fields defined in the response payload schema are included; truncated
-sections report `members_truncated=true` and `members_total=N` (see
+Emit the raw `NodeInspectResponse` as pretty-printed JSON to stdout instead of
+the Rich table. All fields defined in the response payload schema are included;
+truncated sections report `members_truncated=true` and `members_total=N` (see
 § Payload size budget). Designed for programmatic consumers and shell pipelines.
 
 ```
-$ tourctl node inspect node-3 --json
+$ tourctl node inspect peer-3.prod.example.com:7701 --json
 {
   "node_id": "node-3",
   "phase": "ready",
@@ -136,25 +120,7 @@ $ tourctl node inspect node-3 --json
   "members_truncated": false,
   "members_total": 3,
   "probe_states": [...],
-  "probe_states_truncated": false,
-  "forwarded_by": "node-1"
-}
-```
-
-When combined with `--peer-view`:
-
-```
-$ tourctl node inspect node-3 --peer-view --json
-{
-  "target_node_id": "node-3",
-  "observed_by": "node-1",
-  "phase": "ready",
-  "generation": 1,
-  "seq": 7,
-  "peer_address": "peer-3.prod.example.com:7701",
-  "tokens": [439804651110,...],
-  "probe_state": "live",
-  "phi": 1.24
+  "probe_states_truncated": false
 }
 ```
 
@@ -167,7 +133,7 @@ Force the CLI to render every partition range individually, even when
 `partition_shift` is large. Each range uses the standard vnode line format:
 
 ```
-$ tourctl node inspect node-3 --partitions
+$ tourctl node inspect peer-3.prod.example.com:7701 --partitions
 ...
   Ring position  (partition_shift=16, 65 536 total partitions)
     Owned partitions:  16 384  (25.0 % of total)
@@ -192,55 +158,20 @@ When `len(partition_ranges) ≤ PARTITION_DISPLAY_THRESHOLD`, every range is
 always rendered using the same `token 0x…  →  pids  N–M  (K partitions)` line,
 even without `--partitions`.
 
-#### `--peer-view`
-
-Asks the contact node to return its own gossip record for `<node-id>` without
-contacting the target. Does **not** perform any forwarding: the contact node
-answers from its `MemberRegistry` alone.
-
-```
-$ tourctl node inspect node-3 --peer-view
-Gossip view of node-3  (observed by node-1) ...
-
-  ⚠ This is node-1's cached gossip record, not a live response from node-3.
-
-  Phase:       READY
-  Generation:  1
-  Seq:         7
-  Peer:        peer-3.prod.example.com:7701
-  Tokens:      4 tokens
-  Probe state: LIVE  (φ = 1.24)
-```
-
-If the contact node has no entry for the given `node-id` in its registry, it
-returns an error:
-
-```
-✗ node-1 has no gossip record for node-3.
-  exit code 1
-```
-
 ---
 
 ## Design
 
 ### Data model
 
-#### Request payloads
+#### Request payload
 
 ```
 kind = node.inspect
-payload = {
-  "target_node_id": str   # node to inspect
-}
-
-kind = node.inspect.peer_view
-payload = {
-  "target_node_id": str   # node whose gossip record is requested
-}
+payload = {}
 ```
 
-#### Response payloads
+#### Response payload
 
 ```
 kind = node.inspect.response
@@ -275,21 +206,7 @@ payload = {
     {"node_id": str, "state": str, "phi": float},
     ...
   ],
-  "probe_states_truncated": bool,        # true when probe table was cut to fit the payload budget
-  "forwarded_by":          str | None    # node_id of the contact that proxied this, if any
-}
-
-kind = node.inspect.peer_view.response
-payload = {
-  "target_node_id": str,
-  "observed_by":    str,         # node_id of the contact node answering
-  "phase":          str,
-  "generation":     int,
-  "seq":            int,
-  "peer_address":   str,
-  "tokens":         list[int],
-  "probe_state":    str,         # MemberState: "live" | "suspect" | "unknown"
-  "phi":            float        # current φ value; 0.0 when no observations
+  "probe_states_truncated": bool         # true when probe table was cut to fit the payload budget
 }
 ```
 
@@ -298,36 +215,20 @@ flow defined in proposal 001):
 
 | `kind` | When |
 |--------|------|
-| `error.node_not_found` | Contact node has no registry entry for `target_node_id` (forwarding path), or registry is empty |
-| `error.node_unreachable` | Contact node could not connect to target's peer address within the attempt timeout |
+| `error.node_unreachable` | tourctl could not connect to `<address>` within the attempt timeout |
 | `error.node_not_inspectable` | Target node received the request but its phase does not allow self-inspection (e.g. `IDLE` with no topology yet; the node falls back to returning a minimal response rather than this error — see below) |
-| `error.forward_loop` | A node detecting that `target_node_id` equals its own node_id refuses to forward and returns an error if it cannot answer locally (safety guard against misconfiguration) |
 
 ### Core invariants
 
-- The response to `node.inspect` is **always built by the target node itself**.
-  A contact node that proxies the request does not modify, supplement, or
-  re-interpret the payload. It copies the target's response envelope unchanged
-  back to the tourctl client.
-- `node.inspect.peer_view` is **always answered by the contact node from its
-  own registry** without any forwarding. The contact never relays this request
-  to the target.
-- The contact node **performs at most one forwarding hop**. If the contact node
-  receives `node.inspect` and is not the target, it opens one TcpClient
-  connection to the target, forwards the request, and proxies the response.
-  The target never forwards further, even if it is also not the intended
-  destination (misconfiguration error → `error.forward_loop`).
-- Forwarding uses a fresh `TcpClient` connection and a new `correlation_id` for
-  the sub-request. The outer `correlation_id` (from tourctl) is preserved in
-  the proxied response envelope returned to tourctl.
-- The contact node closes its TcpClient connection to the target immediately
-  after receiving the response (one-shot pattern per proposal 001).
+- `tourctl` opens a direct mTLS connection to the address supplied on the
+  command line. No intermediary node is involved; no request forwarding occurs.
+- The response to `node.inspect` is **always built by the target node itself**
+  from its own in-memory state. No other node constructs or modifies it.
 - `partition_ranges` are computed purely from the target's own `Partitioner`
   and `Ring` state; they are never read from `state.toml`. They reflect the
   in-memory ring at the time of the request.
 - `probe_states` reflect the target's `ProbeManager` at the time of the
-  request. For the `--peer-view` path, the `phi` value is read from the
-  contact's `ProbeManager` for the target.
+  request.
 - An `IDLE` node that receives a `node.inspect` request (possible during a
   brief window before sockets are closed or during a crash-recovery restart)
   returns a minimal response: phase, generation, seq, epoch from its current
@@ -337,51 +238,19 @@ flow defined in proposal 001):
 - The handler for `node.inspect` is registered on the **peer `Dispatcher`
   only**. The KV dispatcher must not expose this handler.
 
-### Sequence / flow — direct inspect (with forwarding)
+### Sequence / flow
 
 ```
-tourctl                          node-1 (contact)              node-3 (target)
-  │                                    │                              │
-  │── node.inspect ──────────────────► │                              │
-  │   {target: "node-3"}               │                              │
-  │                                    │  lookup "node-3" in registry │
-  │                                    │  found: peer = peer-3:7701   │
-  │                                    │── node.inspect ─────────────►│
-  │                                    │   {target: "node-3"}         │
-  │                                    │   (new correlation_id)       │
-  │                                    │                              │ build response:
-  │                                    │                              │   NodeState, ring,
-  │                                    │                              │   partitioner, members,
-  │                                    │                              │   probe_states
-  │                                    │◄─ node.inspect.response ─────│
-  │                                    │   forwarded_by=None          │
-  │                                    │                              │
-  │                             set forwarded_by="node-1"             │
-  │◄── node.inspect.response ──────────│                              │
-  │    forwarded_by="node-1"           │                              │
-  │    (original correlation_id)       │                              │
+tourctl                          node-3
+  │                                 │
+  │── node.inspect ───────────────► │
+  │   {}                            │ build response:
+  │                                 │   NodeState, ring,
+  │                                 │   partitioner, members,
+  │                                 │   probe_states
+  │◄── node.inspect.response ───────│
 ```
 
-When the contact IS the target (`target_node_id == self.node_id`):
-
-```
-tourctl                          node-3 (contact == target)
-  │                                    │
-  │── node.inspect ──────────────────► │
-  │   {target: "node-3"}               │ build response locally
-  │◄── node.inspect.response ──────────│ forwarded_by=None
-```
-
-### Sequence / flow — `--peer-view`
-
-```
-tourctl                          node-1 (contact)
-  │                                    │
-  │── node.inspect.peer_view ────────► │
-  │   {target: "node-3"}               │ lookup "node-3" in own registry
-  │                                    │ read own ProbeManager state for "node-3"
-  │◄── node.inspect.peer_view.response─│ no connection to node-3 at any point
-```
 
 ### Partition range computation
 
@@ -465,59 +334,41 @@ registry size before truncation. The CLI warns the operator when either flag is
     Use --json to pipe the full JSON payload for offline analysis when available.
 ```
 
-`NodePeerViewResponse` is small and fixed-size (no member list); it is never
-subject to truncation.
-
 ### Error paths
 
 | Condition | Response |
 |-----------|----------|
-| `target_node_id` not found in contact node's registry | `error.node_not_found` response; tourctl prints `✗ node-1 has no routing entry for node-3.` exit 1 |
-| Contact node cannot connect to target peer address (timeout / refused) | `error.node_unreachable` response; tourctl prints `✗ node-3 is unreachable (peer-3:7701: connection refused). Try --peer-view to query node-1's gossip record.` exit 1 |
-| `--peer-view` and no registry entry for target | `error.node_not_found` response; tourctl prints `✗ node-1 has no gossip record for node-3.` exit 1 |
-| Target node in a phase that has no peer socket (e.g. shut down mid-transition) | TCP connection refused → `error.node_unreachable` on the contact |
-| `node.inspect` received by a node that is itself not the target and has no entry for the target | `error.node_not_found` |
-| Response timeout (either tourctl ↔ contact or contact ↔ target) | `ResponseTimeoutError` on the affected TcpClient; tourctl prints `✗ Inspect timed out after <N>s.` exit 1 |
+| tourctl cannot connect to `<address>` (timeout / refused) | `error.node_unreachable` response; tourctl prints `✗ peer-3.prod.example.com:7701 is unreachable (connection refused).` exit 1 |
+| Target node in a phase that has no peer socket (e.g. shut down mid-transition) | TCP connection refused |
+| Response timeout | `ResponseTimeoutError` on the TcpClient; tourctl prints `✗ Inspect timed out after <N>s.` exit 1 |
 
 ---
 
 ## Design decisions
 
-### Decision: single forwarding hop, no multi-hop chaining
+### Decision: direct connection — no contact-node proxy
 
-**Alternatives considered:** allow cascading forwarding (node-1 → node-2 →
-node-3 if node-2 knows node-3 but node-1 does not).
+**Alternatives considered:** route through a well-known contact node that
+forwards to the target (original design), or redirect (return target address
+for tourctl to reconnect).
 
-**Chosen because:** multi-hop forwarding introduces unbounded latency,
-amplifies the blast radius of a misconfiguration (forwarding loops), and is
-unnecessary in a well-converged gossip cluster — every node's registry should
-contain all live peers within a few gossip rounds. Enforcing exactly one hop
-makes the failure surface predictable: if the contact cannot reach the target
-directly, it surfaces `error.node_unreachable` and the operator uses
-`--peer-view` for offline diagnostics.
+**Chosen because:** since `tourctl` already knows the target's peer address
+(the operator supplies it explicitly), adding an intermediary hop adds latency,
+complexity, and a second point of failure with no benefit. Direct mTLS gives
+the operator an immediate, unambiguous view of the exact node they addressed.
+The operator is responsible for having network access to the target address
+(VPN, bastion, etc.) — the same requirement that applies to `tourctl node join`.
 
-### Decision: contact node proxies response, not redirects
+### Decision: address-based routing
 
-**Alternatives considered:** contact node replies with `node.inspect.redirect`
-carrying the target's peer address, then tourctl opens a second connection
-directly to the target.
+**Alternatives considered:** pass `node_id` and require a registry-owning
+contact to route the request.
 
-**Chosen because:** tourctl operators configure a single peer endpoint in
-`contexts.toml`. Firewalls, NAT, or network segmentation may prevent tourctl
-from reaching internal peer addresses directly. Proxying through the contact
-node preserves the single-entry-point model from proposal 001. The latency
-overhead of one extra hop is negligible for an infrequent operator command.
-
-### Decision: `--peer-view` is a separate envelope kind, not a flag in the payload
-
-**Alternatives considered:** a single `node.inspect` payload with a boolean
-`peer_view` field that the contact node interprets.
-
-**Chosen because:** the two modes have fundamentally different semantics and
-response schemas. A boolean field would force the contact node to branch on a
-flag deep in the handler and return two incompatible payload shapes under the
-same `kind`. Separate envelope kinds make the handler table explicit,
-self-documenting, and consistent with the `<domain>.<verb>` naming convention.
+**Chosen because:** `tourctl` already supplies the target's peer address
+directly, so no registry lookup is needed and routing is deterministic
+regardless of gossip convergence state. The node self-identifies in the
+response (`node_id` field), giving the operator its logical name after the
+fact.
 
 ### Decision: partition range display threshold
 
@@ -533,17 +384,7 @@ each covering ~2 048 partitions — still readable but long. The threshold
 full list on large spaces use `--partitions`. The response payload always
 carries the complete data; truncation is a CLI rendering decision only.
 
-### Decision: `forwarded_by` field in the response payload
-
-**Alternatives considered:** omit it; convey it as a log line in the CLI.
-
-**Chosen because:** the `forwarded_by` field makes the routing hop explicit in
-the structured response data, which is useful for programmatic consumers
-(scripts, monitoring) and for debugging. The CLI displays it in the header
-line (`via node-1`) only when the value is non-null, keeping the happy-path
-output clean.
-
-### Decision: IDLE nodes return a minimal response rather than an error
+### Decision: partition range display threshold
 
 **Alternatives considered:** return `error.node_not_inspectable`; refuse the
 request entirely.
@@ -652,9 +493,7 @@ class NodeInspectResponse:
     node_id, truncated to INSPECT_MEMBER_LIMIT when the registry is large.
     members_total always reflects the true registry size before truncation.
     probe_states contains entries from the target's ProbeManager, sorted by
-    node_id, subject to the same limit. forwarded_by is None when the contact
-    node and the target node are the same; otherwise it is the node_id that
-    proxied the request.
+    node_id, subject to the same limit.
 
     Both members_truncated and probe_states_truncated default to False and are
     always present in the serialised payload.
@@ -678,27 +517,6 @@ class NodeInspectResponse:
     members_total: int
     probe_states: tuple[ProbeSummary, ...]
     probe_states_truncated: bool
-    forwarded_by: str | None
-
-
-@dataclass(frozen=True)
-class NodePeerViewResponse:
-    """Gossip record returned by the contact node for node.inspect.peer_view.
-
-    This response is constructed from the contact node's own MemberRegistry
-    and ProbeManager. It never involves the target node. phi is 0.0 when the
-    contact has never recorded a probe observation for the target.
-    """
-
-    target_node_id: str
-    observed_by: str
-    phase: str        # MemberPhase value
-    generation: int
-    seq: int
-    peer_address: str
-    tokens: tuple[int, ...]
-    probe_state: str  # MemberState value
-    phi: float
 
 
 # tourillon/core/handlers/inspect.py  (registered on peer Dispatcher)
@@ -706,52 +524,20 @@ class NodePeerViewResponse:
 class NodeInspectHandler:
     """ConnectionHandler for node.inspect on the peer endpoint.
 
-    Reads the target_node_id from the request payload. If the target equals
-    self.node_id, builds and returns NodeInspectResponse locally. Otherwise,
-    looks up the target in the TopologyManager registry, opens a TcpClient
-    connection to the target's peer_address, forwards the request, awaits the
-    response, sets forwarded_by=self.node_id in the response payload, and
-    returns it to the caller. The TcpClient connection is closed after the
-    first response is received.
-
-    If the target is not found in the registry, sends error.node_not_found.
-    If the target is unreachable, sends error.node_unreachable.
+    Receives an empty payload. Builds NodeInspectResponse from the node's own
+    in-memory state (NodeState, Ring, Partitioner, MemberRegistry,
+    ProbeManager) and sends it back. No outbound connection is made.
     """
 
     def __init__(
         self,
         node_id: str,
+        peer_address: str,
         node_state: "NodeStateAccessor",
         topology_manager: "TopologyManager",
         probe_manager: "ProbeManager",
         partitioner: "Partitioner",
-        peer_address: str,
         kv_address: str,
-        tls_ctx: "ssl.SSLContext",
-        attempt_timeout: float,
-    ) -> None: ...
-
-    async def __call__(
-        self,
-        receive: "ReceiveEnvelope",
-        send: "SendEnvelope",
-    ) -> None: ...
-
-
-class NodeInspectPeerViewHandler:
-    """ConnectionHandler for node.inspect.peer_view on the peer endpoint.
-
-    Reads the target_node_id from the payload. Returns NodePeerViewResponse
-    built from self's MemberRegistry and ProbeManager without contacting the
-    target. Sends error.node_not_found if the target is absent from the
-    registry.
-    """
-
-    def __init__(
-        self,
-        node_id: str,
-        topology_manager: "TopologyManager",
-        probe_manager: "ProbeManager",
     ) -> None: ...
 
     async def __call__(
@@ -764,22 +550,20 @@ class NodeInspectPeerViewHandler:
 # tourctl/core/commands/inspect.py
 
 class InspectCommand:
-    """Sends node.inspect (or node.inspect.peer_view) and renders the result.
+    """Opens a direct mTLS connection to target_address and renders the result.
 
-    Connects to the peer endpoint in the active context, sends the request,
-    awaits NodeInspectResponse (or NodePeerViewResponse), and renders the
-    structured output. The standard format for every vnode partition range line
-    is:
+    Sends node.inspect with an empty payload, awaits NodeInspectResponse, and
+    renders the structured output. The standard format for every vnode
+    partition range line is:
 
         token 0x<8 hex digits>…  →  pids  <start>–<end>  (<count> partitions)
 
     This format is used unconditionally whenever partition ranges are rendered,
-    whether from a self-inspect, a forwarded inspect, or --partitions. When
-    json_output=True the raw response is serialised to JSON and written to
-    stdout (token_hex in the JSON carries the full untruncated hex string);
-    otherwise Rich is used for human-readable tabular output. CLI rendering
-    collapses partition_ranges to a hint line when
-    len(partition_ranges) > PARTITION_DISPLAY_THRESHOLD unless
+    whether from a direct inspect or --partitions. When json_output=True the
+    raw response is serialised to JSON and written to stdout (token_hex in the
+    JSON carries the full untruncated hex string); otherwise Rich is used for
+    human-readable tabular output. CLI rendering collapses partition_ranges to
+    a hint line when len(partition_ranges) > PARTITION_DISPLAY_THRESHOLD unless
     show_all_partitions=True. A truncation warning is printed when
     members_truncated or probe_states_truncated is True.
     """
@@ -789,8 +573,7 @@ class InspectCommand:
 
     async def run(
         self,
-        target_node_id: str,
-        peer_view: bool,
+        target_address: str,
         show_all_partitions: bool,
         json_output: bool,
         timeout: float,
@@ -805,9 +588,9 @@ class InspectCommand:
 tourillon/
   core/
     handlers/
-      inspect.py     # NodeInspectHandler, NodeInspectPeerViewHandler
+      inspect.py     # NodeInspectHandler
     structure/
-      inspect.py     # NodeInspectResponse, NodePeerViewResponse, PartitionRange,
+      inspect.py     # NodeInspectResponse, PartitionRange,
                      # MemberSummary, ProbeSummary
 
 tourctl/
@@ -819,10 +602,9 @@ tourctl/
       node.py        # Typer command: `tourctl node inspect` (registers InspectCommand)
 ```
 
-No new files are added to `tourillon/infra/cli/` — `NodeInspectHandler` and
-`NodeInspectPeerViewHandler` are instantiated at server startup and registered
-on the peer `Dispatcher`. No changes to `tourillon/infra/cli/node.py` beyond
-wiring the two new handlers.
+No new files are added to `tourillon/infra/cli/` — `NodeInspectHandler` is
+instantiated at server startup and registered on the peer `Dispatcher`. No
+changes to `tourillon/infra/cli/node.py` beyond wiring the new handler.
 
 ---
 
@@ -832,48 +614,38 @@ All scenarios run with in-memory adapters unless marked `[e2e]`.
 
 | # | Fixture | Action | Expected |
 |---|---------|--------|----------|
-| 1 | Single in-memory node (node-1), `READY`, 4 vnodes, `partition_shift=10` | Send `node.inspect` with `target="node-1"` | Receives `node.inspect.response`; `node_id="node-1"`, `owned_partitions=1024`, `len(partition_ranges)==4`, `forwarded_by=None` |
-| 2 | Two in-memory nodes (node-1, node-2), both `READY`; node-1 is contact | Send `node.inspect` with `target="node-2"` to node-1 | node-1 forwards to node-2; receives response with `node_id="node-2"`, `forwarded_by="node-1"` |
-| 3 | node-1 as contact; `target="node-1"` (self-inspect) | Send `node.inspect` | No forwarding occurs; `forwarded_by=None`; response identical to scenario 1 |
-| 4 | node-1 as contact; `target="node-99"` (unknown) | Send `node.inspect` | node-1 returns `error.node_not_found`; no TcpClient connection attempt |
-| 5 | node-1 as contact; node-2 registered but peer socket refused | Send `node.inspect` for node-2 | node-1 returns `error.node_unreachable`; connection attempt made to node-2:7701 |
-| 6 | node-1 as contact; `MemberRegistry` has node-2 with phase=DRAINING | Send `node.inspect.peer_view` for node-2 | Returns `node.inspect.peer_view.response`; `observed_by="node-1"`, `phase="draining"`, no connection to node-2 |
-| 7 | node-1 as contact; `target="node-99"` | Send `node.inspect.peer_view` | Returns `error.node_not_found`; no connection attempt |
-| 8 | node-1 in phase `IDLE` (no topology built yet) | Send `node.inspect` with `target="node-1"` | Returns `node.inspect.response` with `phase="idle"`, empty `tokens`, `partition_ranges`, `members`, `probe_states` |
-| 9 | `NodeInspectResponse` serialisation round-trip | Encode with `MsgpackSerializerAdapter`, decode | All fields preserved exactly including nested `PartitionRange` tuples |
-| 10 | node-1 contact; node-2 target with `probe_state=SUSPECT` | Send `node.inspect.peer_view` for node-2 | `probe_state="suspect"`, `phi > 8.0` in response |
-| 11 | node-1 contact; in-memory target holding a `node.inspect` response late by `RESPONSE_TIMEOUT` | Send `node.inspect` | node-1 client raises `ResponseTimeoutError`; node-1 returns `error.node_unreachable` to tourctl; both connections closed |
-| 12 | Single node, `partition_shift=4`, 8 vnodes (size L) | `NodeInspectHandler._build_partition_ranges()` | Returns 8 `PartitionRange` entries; `sum(r.count for r in ranges) == 16` (total partitions); all `[start_pid, end_pid]` non-overlapping |
-| 13 | `partition_ranges` with `len > PARTITION_DISPLAY_THRESHOLD` | `InspectCommand.run(show_all_partitions=False)` | CLI prints summary line `N ranges (use --partitions to list all)`; no individual range lines |
-| 14 | Same as 13 | `InspectCommand.run(show_all_partitions=True)` | CLI prints all individual range lines |
-| 15 | `node.inspect` forwarded; target modifies `forwarded_by` to its own node_id | Validate response | Response is rejected; `forwarded_by` is set by the contact node, never by the target (this is a deserialization validation scenario ensuring target returns `forwarded_by=None`) |
-| 16 | Contact node receives `node.inspect` for a target it would need to forward to, but target's `peer_address` is empty string in registry | Send `node.inspect` | Returns `error.node_not_found` (no usable address for routing); logged as a warning |
-| 17 | Single node `READY`; `InspectCommand.run(json_output=True)` | Execute command | stdout contains valid JSON; `members_truncated=false`; `probe_states_truncated=false`; all numeric fields present |
-| 18 | Single node `READY`; `InspectCommand.run(json_output=True, peer_view=True)` | Execute command | stdout contains valid JSON with `target_node_id`, `observed_by`, `probe_state`, `phi` fields |
-| 19 | In-memory node with `INSPECT_MEMBER_LIMIT + 1` registry entries | Build `NodeInspectResponse` via handler | `members` contains exactly `INSPECT_MEMBER_LIMIT` entries; `members_truncated=True`; `members_total == INSPECT_MEMBER_LIMIT + 1` |
-| 20 | In-memory node with `INSPECT_MEMBER_LIMIT + 1` probe entries | Build `NodeInspectResponse` via handler | `probe_states` contains exactly `INSPECT_MEMBER_LIMIT` entries; `probe_states_truncated=True` |
-| 21 | `InspectCommand.run(json_output=False)` with `members_truncated=True` | Render rich output | CLI prints warning line `⚠ Membership list truncated: showing N of M members.` |
-| 22 | Serialized response with all fields at maximum realistic size (10 000 members × max-length strings) | Serialize with `MsgpackSerializerAdapter` | `len(serialized) <= MAX_PAYLOAD_DEFAULT` (4 MiB); no truncation step needed at this limit |
-| 23 | Simulated response pre-truncation that would exceed `MAX_PAYLOAD_DEFAULT` (step-6 fallback) | Handler clears `probe_states`, re-serializes | Final payload ≤ 4 MiB; `probe_states_truncated=True`; `members` untouched if it now fits |
-| 24 `[e2e]` | Two real nodes, mTLS, node-1 contact, node-2 target | `tourctl node inspect node-2` | Full CLI output rendered; `forwarded_by="node-1"` visible |
-| 25 `[e2e]` | Two real nodes; node-2 stopped | `tourctl node inspect node-2` | CLI prints `✗ node-2 is unreachable`; suggestion to use `--peer-view` |
-| 26 `[e2e]` | Two real nodes; node-2 stopped | `tourctl node inspect node-2 --peer-view` | CLI renders node-1's gossip record for node-2 with last known phase and phi value |
-| 27 `[e2e]` | Two real nodes | `tourctl node inspect node-2 --json` | stdout is valid JSON parseable by `json.loads()`; `forwarded_by` field present |
+| 1 | Single in-memory node (node-1, peer `127.0.0.1:7701`), `READY`, 4 vnodes, `partition_shift=10` | `InspectCommand.run(target_address="127.0.0.1:7701")` — direct mTLS connection | Receives `node.inspect.response`; `node_id="node-1"`, `owned_partitions=1024`, `len(partition_ranges)==4` |
+| 2 | In-memory node (node-2, peer `127.0.0.2:7701`), `READY`, 4 vnodes | `InspectCommand.run(target_address="127.0.0.2:7701")` — direct mTLS connection | Receives `node.inspect.response` with `node_id="node-2"`; no intermediary involved |
+| 3 | No node listening at `127.0.0.9:7701` | `InspectCommand.run(target_address="127.0.0.9:7701")` | Direct connection refused; tourctl prints `✗ 127.0.0.9:7701 is unreachable (connection refused).`; exit 1 |
+| 4 | node-2's peer server has been stopped; address `127.0.0.2:7701` reports connection refused | `InspectCommand.run(target_address="127.0.0.2:7701")` | Connection refused; tourctl prints unreachable message; exit 1 |
+| 5 | node-1 in phase `IDLE` (no topology built yet), peer `127.0.0.1:7701` | `InspectCommand.run(target_address="127.0.0.1:7701")` | Returns `node.inspect.response` with `phase="idle"`, empty `tokens`, `partition_ranges`, `members`, `probe_states` |
+| 6 | `NodeInspectResponse` serialisation round-trip | Encode with `MsgpackSerializerAdapter`, decode | All fields preserved exactly including nested `PartitionRange` tuples |
+| 7 | In-memory target at `127.0.0.1:7701` delays response beyond `RESPONSE_TIMEOUT` | `InspectCommand.run(target_address="127.0.0.1:7701")` | `ResponseTimeoutError` raised in `TcpClient`; tourctl prints `✗ Inspect timed out after <N>s.`; exit 1 |
+| 8 | Single node, `partition_shift=4`, 8 vnodes (size L), peer `127.0.0.1:7701` | `NodeInspectHandler._build_partition_ranges()` | Returns 8 `PartitionRange` entries; `sum(r.count for r in ranges) == 16` (total partitions); all `[start_pid, end_pid]` non-overlapping |
+| 9 | `partition_ranges` with `len > PARTITION_DISPLAY_THRESHOLD` | `InspectCommand.run(show_all_partitions=False)` | CLI prints summary line `N ranges (use --partitions to list all)`; no individual range lines |
+| 10 | Same as 9 | `InspectCommand.run(show_all_partitions=True)` | CLI prints all individual range lines |
+| 11 | Single node `READY`; `InspectCommand.run(json_output=True)` | Execute command | stdout contains valid JSON; `members_truncated=false`; `probe_states_truncated=false`; all numeric fields present |
+| 12 | In-memory node with `INSPECT_MEMBER_LIMIT + 1` registry entries | Build `NodeInspectResponse` via handler | `members` contains exactly `INSPECT_MEMBER_LIMIT` entries; `members_truncated=True`; `members_total == INSPECT_MEMBER_LIMIT + 1` |
+| 13 | In-memory node with `INSPECT_MEMBER_LIMIT + 1` probe entries | Build `NodeInspectResponse` via handler | `probe_states` contains exactly `INSPECT_MEMBER_LIMIT` entries; `probe_states_truncated=True` |
+| 14 | `InspectCommand.run(json_output=False)` with `members_truncated=True` | Render rich output | CLI prints warning line `⚠ Membership list truncated: showing N of M members.` |
+| 15 | Serialized response with all fields at maximum realistic size (10 000 members × max-length strings) | Serialize with `MsgpackSerializerAdapter` | `len(serialized) <= MAX_PAYLOAD_DEFAULT` (4 MiB); no truncation step needed at this limit |
+| 16 | Simulated response pre-truncation that would exceed `MAX_PAYLOAD_DEFAULT` (step-6 fallback) | Handler clears `probe_states`, re-serializes | Final payload ≤ 4 MiB; `probe_states_truncated=True`; `members` untouched if it now fits |
+| 17 `[e2e]` | Two real nodes (node-1, node-2) with mTLS; node-2 running | `tourctl node inspect <node-2-peer-addr>` — direct connection | Full CLI output rendered; data self-reported by node-2 |
+| 18 `[e2e]` | Two real nodes; node-2 stopped | `tourctl node inspect <node-2-peer-addr>` | CLI prints `✗ <addr> is unreachable` |
+| 19 `[e2e]` | Two real nodes | `tourctl node inspect <node-2-peer-addr> --json` | stdout is valid JSON parseable by `json.loads()`; all payload fields defined in the response schema are present |
 
 ---
 
 ## Exit criteria
 
 - [ ] All test scenarios pass.
-- [ ] `tourctl node inspect <self>` (self-inspect) returns `forwarded_by=None` and correct partition ranges.
-- [ ] `tourctl node inspect <other>` (forwarded) returns `forwarded_by=<contact>` and data built by the target.
-- [ ] `node.inspect.peer_view` never opens a connection to the target node; verified by in-memory adapter asserting zero TcpClient calls.
+- [ ] `tourctl node inspect <address>` opens a direct mTLS connection to `<address>`; no intermediary node is involved and no forwarding occurs.
+- [ ] The target node builds the inspect response entirely from its own in-memory state; no other node constructs or modifies it.
 - [ ] `node.inspect` handler is registered on the **peer** `Dispatcher` only; the KV `Dispatcher` closes the connection on unknown kind (verified by scenario from proposal 001).
 - [ ] Partition ranges sum to correct total for every `NodeSize` × `partition_shift` combination tested.
 - [ ] CLI truncates partition output above `PARTITION_DISPLAY_THRESHOLD` unless `--partitions` is passed.
-- [ ] `error.node_not_found` returned when target is absent from registry; `error.node_unreachable` when target is registered but connection fails.
+- [ ] `error.node_unreachable` returned when the connection to `target_address` fails.
 - [ ] `--json` emits valid JSON to stdout; output is parseable by `json.loads()` and matches the payload schema exactly.
-- [ ] `--json --peer-view` emits `NodePeerViewResponse` as valid JSON.
 - [ ] `members_truncated=True` and `members_total=N` are emitted when the registry exceeds `INSPECT_MEMBER_LIMIT`; CLI warns the operator.
 - [ ] `probe_states_truncated=True` is emitted when probe table exceeds `INSPECT_MEMBER_LIMIT`.
 - [ ] Serialized `NodeInspectResponse` with exactly `INSPECT_MEMBER_LIMIT` members fits within `MAX_PAYLOAD_DEFAULT` (4 MiB) — verified by a dedicated size assertion in the test suite.
@@ -889,5 +661,7 @@ All scenarios run with in-memory adapters unless marked `[e2e]`.
 Streaming inspect (following partition migration in real time), cluster-wide
 broadcast inspect (aggregate view from all nodes simultaneously), health-check
 endpoint (lighter-weight liveness probe — separate proposal), KV data-plane
-metrics (key counts, bytes stored per partition), and historical gossip log
-replay. These are left to dedicated proposals.
+metrics (key counts, bytes stored per partition), historical gossip log replay,
+and gossip-view queries (asking a live node for its cached record of a
+potentially unreachable peer — see `docs/known-issues-and-todos.md`). These
+are left to dedicated proposals.

@@ -4,7 +4,7 @@
 **Status:** Accepted — Completed by proposal 005
 **Date:** 2026-05-10
 **Sequence:** 004
-**Schema version:** 2
+**Revision:** 2
 
 ---
 
@@ -205,7 +205,8 @@ the seeds from its own `config.toml`.
 The command returns immediately after the target acknowledges the join request
 (`node.join.ok`). The target executes the `IDLE → JOINING` transition and
 gossip bootstrap asynchronously. The operator monitors progress via
-`tourctl node inspect <node-id>` (the node-id is shown in the command output).
+`tourctl node inspect <peer-address>` (the peer address is shown in the command
+output).
 
 ```
 $ tourctl node join 10.0.0.2:7701 --seeds 10.0.0.1:7701
@@ -213,7 +214,7 @@ Connecting to 10.0.0.2:7701 …
 
 Seeded join initiated for node 'node-2'.
 Phase → joining.
-Monitor progress with: tourctl node inspect node-2
+Monitor progress with: tourctl node inspect 10.0.0.2:7701
 ```
 
 Error cases:
@@ -241,7 +242,7 @@ once the engine has started. The `tourctl node inspect` command renders it as
 an additional section:
 
 ```
-$ tourctl node inspect node-1
+$ tourctl node inspect 10.0.0.1:7701
 
 Node:      node-1
 Phase:     ready
@@ -603,9 +604,8 @@ member record changed.
 
 | Invariant | Rule |
 |---|---|
-| Explicit join command | A node with seeds configured never initiates `IDLE → JOINING` autonomously. It always waits for `tourctl node join <node-id>`. |
-| Single-hop forwarding | A contact node that receives `node.join` for a different `target_node_id` forwards the envelope to the target's `peer_address` and relays the response. It never re-forwards. |
-| Peer server always bound | The peer server is bound for every phase so the node can receive operator commands and forwarded requests at any time. |
+| Explicit join command | A node with seeds configured never initiates `IDLE → JOINING` autonomously. It always waits for `tourctl node join <peer-address>`. |
+| Peer server always bound | The peer server is bound for every phase so the node can receive operator commands at any time. |
 | KV server phase guard | The KV server is bound only when `phase ∈ {READY, DRAINING}`. Never opened for IDLE, JOINING, PAUSED, or FAILED. |
 | Self-declared phase | `MemberPhase` is published by the node that owns it. No external actor may override another node's phase. |
 | `MemberState` is local | LIVE / SUSPECT / UNKNOWN is never gossiped, never included in `Member`, never transmitted on the wire. |
@@ -1414,7 +1414,7 @@ tourillon/
     handlers/
       gossip.py         # All gossip peer-server handlers:
                         #   gossip.push, gossip.ping, gossip.digest (responder side)
-      node_join.py      # node.join handler: forwarding + IDLE → JOINING transition
+      node_join.py      # node.join handler: IDLE → JOINING transition
     transport/
       pool.py           # PeerClientPool
     structure/
@@ -1450,44 +1450,42 @@ All scenarios run with in-memory adapters (fake `TcpClient`, fake
 | 7 | node-2 DRAINING (crash-restart) | `tourillon node start` | Peer server + KV server bound; gossip bootstrap starts; phase remains `draining` |
 | 8 | node-2 PAUSED | `tourillon node start` | Peer server bound; KV server **not** bound; no gossip bootstrap; log indicates behaviour out of scope |
 | 9 | node-2 FAILED | `tourillon node start` | Peer server bound; KV server **not** bound; no gossip bootstrap; WARNING logged |
-| 10 | node-2 in phase JOINING; `node.join` received | `tourctl node join node-2` | `node.join.error code: wrong_phase`; no state change |
-| 11 | node-2 IDLE; no seeds in config, no `--seeds` | `tourctl node join node-2` | `node.join.error code: no_seeds`; no state change |
-| 12 | Bootstrap: 3 seeds configured, 1 unreachable | `GossipBootstrapper.run()` | Unreachable seed logged as WARNING; 2 succeed; `seeds_ok=2`; no retry needed; returns 2 |
-| 13 | Bootstrap: all 3 seeds unreachable, `max_retries=3` | `GossipBootstrapper.run()` | 3 attempts each logged as WARNING with increasing delay; `BootstrapError` raised after attempt 3; daemon exits 1 |
-| 14 | Bootstrap: all seeds fail on attempt 1, 1 seed responds on attempt 2 | `GossipBootstrapper.run()` | Attempt 1 → WARNING + backoff sleep; attempt 2 → `seeds_ok=1`; success; no `BootstrapError` |
-| 15 | Bootstrap backoff timing: `initial_delay_s=1.0`, `multiplier=2.0`, `max_retries=3` | Measure elapsed time between attempts | Delays ≈ 1 s (±10 %), 2 s (±10 %) before final failure; total elapsed ≈ 3 s |
-| 16 | Bootstrap: seed has 5 members, joining node has empty registry | `GossipBootstrapper.run()` | Full delta received; `merge_registry()` applies 5 members; `known_members=5` |
-| 17 | Bootstrap: node crashed with `seq=5`, seed has `seq=8` for same node | `GossipBootstrapper.run()` (always full-resync) | Stale record superseded; updated record applied; generation unchanged |
-| 18 | node-1 READY, node-2 JOINING | node-1 transitions READY → DRAINING; announces via hot path | node-2 receives `gossip.push`; `merge_registry()` updates node-1 phase to DRAINING |
-| 19 | node-1 `seq=50`; peer has `seq=200` for same `node_id` | node-1 pushes its own record | `supersedes()` → False → `accepted=0` → no re-propagation |
-| 20 | node-1 `seq=200`; peer has `seq=50` | node-1 pushes its own record | `supersedes()` → True → `accepted=1` → re-propagation if `ttl > 1` |
-| 21 | Two nodes, identical registry and epoch | Anti-entropy ping cycle fires | `gossip.pong` has `same=true`; no digest/delta exchange; total bytes < 200 |
-| 22 | Two nodes, node-2 has stale member `seq=50` vs `seq=100` | Anti-entropy ping cycle fires | `gossip.pong` has `same=false`; digest/delta exchange; node-2 receives updated Member |
-| 23 | Two nodes, epoch divergence (node-2 hasn't applied READY yet) | Anti-entropy ping cycle fires | `gossip.pong` has `same=false` (epoch differs); digest/delta exchange; both converge |
-| 24 | node-1 sends `gossip.digest` with `has_more=true`; `after_node_id="node-m"` | node-2 processes first page | node-2 responds with delta; node-1 sends second page; exchange completes with `has_more=false` |
-| 25 | `gossip.push` payload exceeds `max_payload_bytes` | node-1 pushes 500 members at once | Sender splits into multiple envelopes; each awaits its own `gossip.push.ok` |
-| 26 | `gossip.digest` page exceeds `max_digest_entries` | Oversized page sent | Responder replies `gossip.error code: payload_too_large`; connection closed; pool recreates on next `acquire()` |
-| 27 | Responder receives `Member` with `generation=-1` | Any gossip kind | Responder sends `gossip.error code: invalid_member`; connection closed |
-| 28 | Rate limit exceeded: peer sends >20 rounds/s | Responder tracks rate per peer | Responder sends `gossip.error code: rate_limited`; connection closed |
-| 29 | 0 eligible peers (all IDLE or FAILED) | Hot loop and AE loop tick | No outgoing envelopes; one `logger.debug` per cycle; no crash |
-| 30 | `DRAINING → IDLE` transition | Node announces final IDLE phase | One `gossip.push` with TTL=3 emitted; `GossipEngine.stop()` called; port closed |
-| 31 | `gossip.error` received mid-session | Hot-path or AE cycle in progress | Connection closed; `PeerClientPool` recreates client on next `acquire()`; next cycle resumes normally |
-| 32 | `RESPONSE_TIMEOUT` on outgoing `gossip.ping` | `ResponseTimeoutError` raised | Logged as WARNING; this peer skipped for this AE cycle; next cycle unaffected |
-| 33 | node-1 restarts with `seq=50`; peer has `seq=200` for node-1 | node-1 pushes `seq=50` | Peers reject (superseded); node-1 receives `seq=200` at next AE cycle; emits `seq=201` on next transition |
-| 34 | `gossip_stats` fields | `GossipEngine` runs for N cycles | `push_sent_total`, `ae_cycles_total`, `ae_diverged` match actual activity |
-| 35 `[e2e]` | Two-node cluster, real mTLS sockets | `tourctl node join node-2`; both nodes reach JOINING; gossip runs | Both nodes see each other via `tourctl node inspect`; KV server not bound (rebalance pending) |
-| 36 | `state.toml` has `node_id="node-1"`, `config.toml` has `node_id="node-2"` | `tourillon node start` | Process logs ERROR with both ids; exits with code 1; no socket bound |
-| 37 | `state.toml` has `node_id="node-2"`, `config.toml` has `node_id="node-2"` | `tourillon node start` | node_id check passes; startup continues normally |
-| 38 | `config.node_size=medium` expects 16 tokens; `state.tokens` has 8 entries; `phase=READY` | `tourillon node start` | ERROR logged; `seq` incremented; state written with `phase=FAILED`; peer server bound; KV server NOT bound |
-| 39 | `config.node_size=medium` expects 16 tokens; `state.tokens` has 8 entries; `phase=IDLE` | `tourillon node start` | Tokens/size check skipped; node starts normally in IDLE (awaiting `tourctl node join`) |
-| 40 | `config.node_size=medium` expects 16 tokens; `state.tokens` has 8 entries; `phase=PAUSED` | `tourillon node start` | Tokens/size check skipped; node starts inert in PAUSED; peer server bound; no gossip |
-| 41 | `config.node_size=medium` expects 16 tokens; `state.tokens` has 8 entries; `phase=FAILED` | `tourillon node start` | Tokens/size check skipped; node remains FAILED; peer server bound; WARNING logged |
-| 42 | node-1 (`pshift=12`) receives `gossip.push` from node-2 (`pshift=10`) — node-1 is **responder** | node-1 gossip push handler | node-1 sends `gossip.error code: partition_shift_mismatch`; node-1 does **not** transition to FAILED; node-2 receives the error and transitions to FAILED via write-before-announce → announce → stop |
-| 43 | Two nodes, identical `partition_shift=12` | Normal gossip cycle | No mismatch detected; gossip proceeds normally |
-| 44 | node-1 (`pshift=12`) receives `gossip.delta` containing node-2's member (`pshift=10`) — node-1 is **initiator** of the digest | Anti-entropy AE cycle | node-1 closes connection; logs WARNING; node-1 does **not** transition to FAILED; node-2 eventually pushes and gets rejected → node-2 goes FAILED |
-| 45 | node-2 (`pshift=10`) receives `gossip.error code: partition_shift_mismatch` in response to its own `gossip.push` | node-2 hot-path response handler | node-2 applies write-before-announce → `announce(failed_member)` → `stop()` (hot_queue drained); peers receive FAILED push for node-2 |
-| 46 | Joining node (`pshift=10`) bootstraps against seed whose delta contains members with `pshift=12` | `GossipBootstrapper.run()` | `BootstrapPartitionShiftError` raised immediately; no registry write; no retry; ERROR logged with both pshift values; daemon exits 1 |
-| 47 | Joining node (`pshift=12`) bootstraps against seed whose delta contains members with `pshift=12` | `GossipBootstrapper.run()` | No mismatch; delta applied normally; `seeds_ok=1`; bootstrap succeeds |
+| 10 | Bootstrap: 3 seeds configured, 1 unreachable | `GossipBootstrapper.run()` | Unreachable seed logged as WARNING; 2 succeed; `seeds_ok=2`; no retry needed; returns 2 |
+| 11 | Bootstrap: all 3 seeds unreachable, `max_retries=3` | `GossipBootstrapper.run()` | 3 attempts each logged as WARNING with increasing delay; `BootstrapError` raised after attempt 3; daemon exits 1 |
+| 12 | Bootstrap: all seeds fail on attempt 1, 1 seed responds on attempt 2 | `GossipBootstrapper.run()` | Attempt 1 → WARNING + backoff sleep; attempt 2 → `seeds_ok=1`; success; no `BootstrapError` |
+| 13 | Bootstrap backoff timing: `initial_delay_s=1.0`, `multiplier=2.0`, `max_retries=3` | Measure elapsed time between attempts | Delays ≈ 1 s (±10 %), 2 s (±10 %) before final failure; total elapsed ≈ 3 s |
+| 14 | Bootstrap: seed has 5 members, joining node has empty registry | `GossipBootstrapper.run()` | Full delta received; `merge_registry()` applies 5 members; `known_members=5` |
+| 15 | Bootstrap: node crashed with `seq=5`, seed has `seq=8` for same node | `GossipBootstrapper.run()` (always full-resync) | Stale record superseded; updated record applied; generation unchanged |
+| 16 | node-1 READY, node-2 JOINING | node-1 transitions READY → DRAINING; announces via hot path | node-2 receives `gossip.push`; `merge_registry()` updates node-1 phase to DRAINING |
+| 17 | node-1 `seq=50`; peer has `seq=200` for same `node_id` | node-1 pushes its own record | `supersedes()` → False → `accepted=0` → no re-propagation |
+| 18 | node-1 `seq=200`; peer has `seq=50` | node-1 pushes its own record | `supersedes()` → True → `accepted=1` → re-propagation if `ttl > 1` |
+| 19 | Two nodes, identical registry and epoch | Anti-entropy ping cycle fires | `gossip.pong` has `same=true`; no digest/delta exchange; total bytes < 200 |
+| 20 | Two nodes, node-2 has stale member `seq=50` vs `seq=100` | Anti-entropy ping cycle fires | `gossip.pong` has `same=false`; digest/delta exchange; node-2 receives updated Member |
+| 21 | Two nodes, epoch divergence (node-2 hasn't applied READY yet) | Anti-entropy ping cycle fires | `gossip.pong` has `same=false` (epoch differs); digest/delta exchange; both converge |
+| 22 | node-1 sends `gossip.digest` with `has_more=true`; `after_node_id="node-m"` | node-2 processes first page | node-2 responds with delta; node-1 sends second page; exchange completes with `has_more=false` |
+| 23 | `gossip.push` payload exceeds `max_payload_bytes` | node-1 pushes 500 members at once | Sender splits into multiple envelopes; each awaits its own `gossip.push.ok` |
+| 24 | `gossip.digest` page exceeds `max_digest_entries` | Oversized page sent | Responder replies `gossip.error code: payload_too_large`; connection closed; pool recreates on next `acquire()` |
+| 25 | Responder receives `Member` with `generation=-1` | Any gossip kind | Responder sends `gossip.error code: invalid_member`; connection closed |
+| 26 | Rate limit exceeded: peer sends >20 rounds/s | Responder tracks rate per peer | Responder sends `gossip.error code: rate_limited`; connection closed |
+| 27 | 0 eligible peers (all IDLE or FAILED) | Hot loop and AE loop tick | No outgoing envelopes; one `logger.debug` per cycle; no crash |
+| 28 | `DRAINING → IDLE` transition | Node announces final IDLE phase | One `gossip.push` with TTL=3 emitted; `GossipEngine.stop()` called; port closed |
+| 29 | `gossip.error` received mid-session | Hot-path or AE cycle in progress | Connection closed; `PeerClientPool` recreates client on next `acquire()`; next cycle resumes normally |
+| 30 | `RESPONSE_TIMEOUT` on outgoing `gossip.ping` | `ResponseTimeoutError` raised | Logged as WARNING; this peer skipped for this AE cycle; next cycle unaffected |
+| 31 | node-1 restarts with `seq=50`; peer has `seq=200` for node-1 | node-1 pushes `seq=50` | Peers reject (superseded); node-1 receives `seq=200` at next AE cycle; emits `seq=201` on next transition |
+| 32 | `gossip_stats` fields | `GossipEngine` runs for N cycles | `push_sent_total`, `ae_cycles_total`, `ae_diverged` match actual activity |
+| 33 `[e2e]` | Two-node cluster, real mTLS sockets | `tourctl node join 10.0.0.2:7701`; both nodes reach JOINING; gossip runs | Both nodes see each other via `tourctl node inspect`; KV server not bound (rebalance pending) |
+| 34 | `state.toml` has `node_id="node-1"`, `config.toml` has `node_id="node-2"` | `tourillon node start` | Process logs ERROR with both ids; exits with code 1; no socket bound |
+| 35 | `state.toml` has `node_id="node-2"`, `config.toml` has `node_id="node-2"` | `tourillon node start` | node_id check passes; startup continues normally |
+| 36 | `config.node_size=medium` expects 16 tokens; `state.tokens` has 8 entries; `phase=READY` | `tourillon node start` | ERROR logged; `seq` incremented; state written with `phase=FAILED`; peer server bound; KV server NOT bound |
+| 37 | `config.node_size=medium` expects 16 tokens; `state.tokens` has 8 entries; `phase=IDLE` | `tourillon node start` | Tokens/size check skipped; node starts normally in IDLE (awaiting `tourctl node join`) |
+| 38 | `config.node_size=medium` expects 16 tokens; `state.tokens` has 8 entries; `phase=PAUSED` | `tourillon node start` | Tokens/size check skipped; node starts inert in PAUSED; peer server bound; no gossip |
+| 39 | `config.node_size=medium` expects 16 tokens; `state.tokens` has 8 entries; `phase=FAILED` | `tourillon node start` | Tokens/size check skipped; node remains FAILED; peer server bound; WARNING logged |
+| 40 | node-1 (`pshift=12`) receives `gossip.push` from node-2 (`pshift=10`) — node-1 is **responder** | node-1 gossip push handler | node-1 sends `gossip.error code: partition_shift_mismatch`; node-1 does **not** transition to FAILED; node-2 receives the error and transitions to FAILED via write-before-announce → announce → stop |
+| 41 | Two nodes, identical `partition_shift=12` | Normal gossip cycle | No mismatch detected; gossip proceeds normally |
+| 42 | node-1 (`pshift=12`) receives `gossip.delta` containing node-2's member (`pshift=10`) — node-1 is **initiator** of the digest | Anti-entropy AE cycle | node-1 closes connection; logs WARNING; node-1 does **not** transition to FAILED; node-2 eventually pushes and gets rejected → node-2 goes FAILED |
+| 43 | node-2 (`pshift=10`) receives `gossip.error code: partition_shift_mismatch` in response to its own `gossip.push` | node-2 hot-path response handler | node-2 applies write-before-announce → `announce(failed_member)` → `stop()` (hot_queue drained); peers receive FAILED push for node-2 |
+| 44 | Joining node (`pshift=10`) bootstraps against seed whose delta contains members with `pshift=12` | `GossipBootstrapper.run()` | `BootstrapPartitionShiftError` raised immediately; no registry write; no retry; ERROR logged with both pshift values; daemon exits 1 |
+| 45 | Joining node (`pshift=12`) bootstraps against seed whose delta contains members with `pshift=12` | `GossipBootstrapper.run()` | No mismatch; delta applied normally; `seeds_ok=1`; bootstrap succeeds |
 
 ---
 
