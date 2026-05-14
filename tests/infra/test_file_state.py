@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from unittest.mock import patch
 
@@ -152,6 +153,62 @@ async def test_fsync_dir_swallows_os_error(tmp_path: Path) -> None:
 
     with patch("os.fsync", side_effect=OSError("not supported")):
         _fsync_dir(tmp_path)  # must not raise
+
+
+@pytest.mark.ring
+async def test_concurrent_load_and_save_never_corrupts(tmp_path: Path) -> None:
+    """Concurrent loads and saves complete without StateError or file corruption.
+
+    Simulates the Windows race where multiple _run_transfer tasks call
+    load() concurrently while parallel state commits call save().  All
+    operations should succeed because FileStateAdapter._io_lock serialises
+    every I/O call.
+    """
+    state_path = tmp_path / "state.toml"
+    adapter = FileStateAdapter(state_path)
+
+    base_state = NodeState(
+        node_id="node-1",
+        phase=MemberPhase.JOINING,
+        generation=1,
+        seq=0,
+        tokens=(10, 20),
+        epoch=1,
+    )
+    await adapter.save(base_state)
+
+    errors: list[Exception] = []
+
+    async def do_load() -> None:
+        try:
+            await adapter.load()
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    async def do_save(pid: int) -> None:
+        try:
+            state = NodeState(
+                node_id="node-1",
+                phase=MemberPhase.JOINING,
+                generation=1,
+                seq=pid,
+                tokens=(10, 20),
+                epoch=1,
+                committed_pids=(pid,),
+            )
+            await adapter.save(state)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    async with asyncio.TaskGroup() as tg:
+        for _i in range(20):
+            tg.create_task(do_load())
+        for pid in range(1, 6):
+            tg.create_task(do_save(pid))
+
+    assert errors == [], f"Unexpected errors: {errors}"
+    final = await adapter.load()
+    assert final is not None
 
 
 @pytest.mark.ring

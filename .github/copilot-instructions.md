@@ -117,20 +117,22 @@ Tourillon uses a strict **hexagonal architecture**:
 ```
 tourillon/
   bootstrap/   # startup sequence: config loading, pid.lock, TLS context wiring
-  core/        # domain logic — zero infrastructure imports
+  core/        # domain logic + stdlib-only utilities — no third-party imports
     ring/      # HashSpace, VNode, Ring, Partitioner, PlacementStrategy
     gossip/    # GossipEngine, GossipPayload
     kv/        # StoreKey, HLC, Version, Tombstone, store logic
     lifecycle/ # MemberPhase FSM, Member, state.toml reader
     handlers/  # ConnectionHandler implementations (envelope routing)
-    ports/     # Protocol interfaces (storage, network, serializer, clock, pki)
+    ports/     # Protocol interfaces (storage, serializer, clock, pki)
     structure/ # Pure dataclasses shared across layers
+    transport/ # Envelope framing, Dispatcher, TcpServer, TcpClient, PeerClientPool
+               # (stdlib-only: asyncio Streams + ssl; concrete, not pluggable)
   infra/       # adapters — imports third-party libraries
     cli/       # Typer CLI commands (tourillon binary)
     tls/       # ssl.SSLContext factory, mTLS helpers
     pki/       # cryptography library adapter (CertificateAuthorityPort, etc.)
     store/     # on-disk KV storage adapter
-    transport/ # asyncio TCP server/client, Envelope read/write, Dispatcher
+    serializer/# msgpack adapter implementing SerializerPort
 
 tourctl/
   core/
@@ -140,10 +142,17 @@ tourctl/
 ```
 
 Rules:
-- **`core/` never imports from `infra/`** or from any third-party library
-  except `msgpack` indirectly via `SerializerPort`.
-- The core layer depends only on **`ports/` Protocols**. Infra adapters
-  implement those protocols and are injected at startup.
+- **`core/` never imports from `infra/`** and never imports any third-party
+  library (only Python stdlib + first-party `tourillon.*` is allowed). The
+  only exception is `msgpack`, which is reached indirectly via
+  `SerializerPort`.
+- The core layer depends on **`ports/` Protocols** for everything that has a
+  pluggable implementation (storage, serializer, clock, PKI). Concrete
+  stdlib-only utilities that have no substitutable variant live directly in
+  `core/` — notably the transport package (`core/transport/`) which wraps
+  `asyncio` Streams + `ssl.SSLContext` (both stdlib). These classes
+  (`TcpServer`, `TcpClient`, `PeerClientPool`) are concrete singletons, not
+  ports; introducing a Protocol for them would have no second implementation.
 - `SerializerPort`, `StoragePort`, `ClockPort`, `CertificateAuthorityPort`,
   `CertificateIssuerPort` live in `core/ports/`. Their implementations live in
   `infra/`.
@@ -279,6 +288,11 @@ uv run pytest -m kv
 - Bypass type annotations with `Any` unless truly unavoidable; if required, add
   `# noqa: ANN401` with a comment explaining why.
 - Import `msgpack` in `core/` — go through `SerializerPort`.
-- Import `ssl`, `asyncio.start_server`, socket, or filesystem APIs in `core/`.
+- Import any third-party (non-stdlib) library in `core/`. Stdlib modules —
+  including `ssl`, `socket`, `asyncio.start_server`, `asyncio.open_connection`
+  — are allowed in `core/`, but only inside `core/transport/`. Domain
+  packages (`core/ring`, `core/gossip`, `core/lifecycle`, `core/kv`,
+  `core/rebalance`, `core/handlers`) must not import `ssl` or `socket`
+  directly; they go through `core/transport/`.
 - Suggest `pip`, `virtualenv`, or `conda` commands.
 - Generate code that violates any architecture invariant listed above.

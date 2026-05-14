@@ -121,3 +121,99 @@ Store the `generation` counter in a separate, append-only file
   `NodeState`, `FileStateAdapter`.
 - `proposal-gossip-seeded-join-05102026-004.md` — `IDLE → JOINING` transition,
   `supersedes()` merge rule, single-increment invariant.
+
+## FAILED Nodes Excluded from Preference Lists — Availability Tradeoff
+
+**Status:** Design decision — tracked here as a known tradeoff.
+
+---
+
+### Description
+
+When building a `PreferenceList` for a partition, Tourillon explicitly excludes
+nodes in the `FAILED` phase. A `FAILED` node is considered non-functional and
+is never returned as a primary or secondary read/write target.
+
+---
+
+### Tradeoff
+
+Excluding `FAILED` nodes lowers read availability: the effective replication
+factor for the remaining preference list is reduced from `rf` to
+`rf - count(FAILED replicas)`. If `rf = 3` and one replica is `FAILED`, only
+two candidates remain. If `rf = 3` and two replicas are `FAILED`, a single node
+must serve all traffic for that partition.
+
+Tourillon's other live replicas compensate: they still hold valid copies of the
+data and will serve reads. However, quorum reads (when implemented) will require
+a higher proportion of successful responses from a smaller working set, which
+increases latency variance and reduces fault tolerance against transient network
+errors.
+
+**The operator must not leave FAILED nodes in the cluster for extended
+periods when those nodes held data.** The longer a node remains `FAILED`, the
+higher the probability that a second replica failure triggers a quorum miss or
+an unavailability window.
+
+---
+
+### Recommended operator response
+
+| Situation | Action |
+|-----------|--------|
+| Node crashed but disk is intact | Restart the daemon; it will re-join via `FAILED → JOINING → READY` |
+| Node crashed, disk lost | Provision a replacement; issue `tourctl node join` with the same or new address; let rebalance restore data from surviving replicas |
+| Node permanently decommissioned | Issue a `DRAINING` transition to trigger rebalance before removing it |
+
+---
+
+### Related Proposals
+
+- `proposal-ring-first-node-08022026-002.md` — `PreferenceList`, `PlacementStrategy`.
+- `proposal-rebalance-11052026-005.md` — FAILED nodes excluded from
+  `min(old_replicas)` source selection.
+
+---
+
+## Gossip View / Peer-View Query — Deferred
+
+**Status:** Out of scope for proposal 003 — tracked here for future work.
+
+---
+
+### Description
+
+Proposal 003 (`tourctl node inspect`) originally included a `--peer-view` flag
+that would ask the contact node for its **gossip-cached record** of a target
+node, without connecting to the target directly. This is useful when the target
+is unreachable and the operator wants to know what the rest of the cluster
+believes about it (last known phase, generation, probe φ value).
+
+The feature was removed from proposal 003 to keep the scope tight. The direct
+inspect path (`tourctl node inspect <address>`) covers the primary use case.
+
+---
+
+### Deferred behaviour
+
+A future proposal should define `tourctl node gossip-view <contact-addr> --target <target-addr>` (or an equivalent command) with the following semantics:
+
+- `tourctl` connects to `<contact-addr>`.
+- Sends a `node.inspect.peer_view` request with `target_address = <target-addr>`.
+- The contact searches its `MemberRegistry` for the entry whose `peer_address`
+  matches `<target-addr>` and reads its local `ProbeManager` φ value for that
+  member.
+- Returns a `NodePeerViewResponse` payload:
+  `(target_peer_address, target_node_id, observed_by, phase, generation, seq,
+  peer_address, tokens, probe_state, phi)`.
+- No connection to the target node is made at any point.
+
+The contact returns `error.node_not_found` if no registry entry has a
+`peer_address` matching `<target-addr>`.
+
+---
+
+### Related Proposals
+
+- `proposal-node-inspect-05102026-003.md` — original proposal where
+  `--peer-view` was specified and then removed.

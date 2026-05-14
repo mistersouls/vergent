@@ -21,6 +21,7 @@ Handlers:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 from typing import TYPE_CHECKING, Any
@@ -119,6 +120,14 @@ class RebalancePlanHandler:
         resume: bytes | None,
     ) -> None:
         """Source role: stream records then await commit."""
+        pids = [pid for t in transfers for pid in t]
+        dst_nodes = {t.dst for t in transfers}
+        logger.info(
+            "Rebalance source: serving %d pid(s) epoch=%d to %s.",
+            len(pids),
+            self._epoch,
+            ", ".join(sorted(dst_nodes)),
+        )
         await self._send_plan_ok(send, req, resume_from=None)
 
         all_records = []
@@ -150,6 +159,11 @@ class RebalancePlanHandler:
 
         commit_env = await receive()
         await self._process_commit(send, commit_env, all_records, resume)
+        logger.debug(
+            "Rebalance source: transfer complete for %d pid(s) to %s.",
+            len(pids),
+            ", ".join(sorted(dst_nodes)),
+        )
 
     async def _handle_drain_dst(
         self,
@@ -293,6 +307,8 @@ class RebalanceTransferHandler:
         self._storage = storage
         self._state_port = state_port
         self._serializer = serializer
+        # Serialises concurrent state.toml writes from parallel DRAIN sessions.
+        self._state_lock = asyncio.Lock()
 
     async def __call__(
         self,
@@ -384,26 +400,32 @@ class RebalanceTransferHandler:
             records.append(rec)
 
     async def _update_state(self, pid: int) -> None:
-        """Move pid from staging_pids to committed_pids in state.toml."""
+        """Move pid from staging_pids to committed_pids in state.toml.
+
+        Uses _state_lock to serialise concurrent writes from parallel DRAIN
+        sessions.  Without the lock, concurrent os.replace() calls on Windows
+        raise WinError 32 when two coroutines race on the same temp file.
+        """
         from tourillon.core.lifecycle.state import NodeState
 
-        state = await self._state_port.load()
-        if state is None:
-            return
-        new_staging = tuple(p for p in state.staging_pids if p != pid)
-        new_committed = state.committed_pids + (pid,)
-        await self._state_port.save(
-            NodeState(
-                node_id=state.node_id,
-                phase=state.phase,
-                generation=state.generation,
-                seq=state.seq,
-                tokens=state.tokens,
-                epoch=state.epoch,
-                committed_pids=new_committed,
-                staging_pids=new_staging,
+        async with self._state_lock:
+            state = await self._state_port.load()
+            if state is None:
+                return
+            new_staging = tuple(p for p in state.staging_pids if p != pid)
+            new_committed = state.committed_pids + (pid,)
+            await self._state_port.save(
+                NodeState(
+                    node_id=state.node_id,
+                    phase=state.phase,
+                    generation=state.generation,
+                    seq=state.seq,
+                    tokens=state.tokens,
+                    epoch=state.epoch,
+                    committed_pids=new_committed,
+                    staging_pids=new_staging,
+                )
             )
-        )
 
 
 class RebalanceStatusHandler:

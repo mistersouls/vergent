@@ -40,7 +40,12 @@ _DEFAULT_CONTEXTS_PATH = Path.home() / ".config" / "tourillon" / "contexts.toml"
 
 @node_app.command("inspect")
 def node_inspect(
-    node_id: Annotated[str, typer.Argument(help="Node ID to inspect")],
+    peer_address: Annotated[
+        str,
+        typer.Argument(
+            help="Peer server address of the node to inspect (e.g. 127.0.0.1:7701)"
+        ),
+    ],
     timeout: Annotated[
         float,
         typer.Option("--timeout", help="Response timeout in seconds"),
@@ -53,13 +58,15 @@ def node_inspect(
         bool,
         typer.Option("--partitions", help="List every partition range individually"),
     ] = False,
-    peer_view: Annotated[
-        bool,
-        typer.Option("--peer-view", help="Query contact node's gossip record only"),
-    ] = False,
     contexts_path: Annotated[Path, typer.Option("--contexts")] = _DEFAULT_CONTEXTS_PATH,
 ) -> None:
-    """Inspect a node's live state or its peer's gossip record."""
+    """Inspect a node's live state by connecting directly to PEER_ADDRESS.
+
+    Per proposal 003 rev 2 the operator supplies the target node's peer
+    address directly; tourctl opens a direct mTLS connection and the node
+    builds the response from its own in-memory state. No forwarding occurs.
+    TLS credentials are taken from the active context.
+    """
     try:
         contexts_file = load_contexts(contexts_path)
     except ContextsError as exc:
@@ -75,19 +82,12 @@ def node_inspect(
         _err_console.print("✗ No active context. Use `tourctl config use-context`.")
         raise typer.Exit(1)
 
-    peer_endpoint = ctx.endpoints.peer
-    if not peer_endpoint:
-        _err_console.print("✗ Active context has no peer endpoint configured.")
-        raise typer.Exit(1)
-
     exit_code = asyncio.run(
         _run_inspect(
             ctx.credentials.cert_data,
             ctx.credentials.key_data,
             ctx.cluster.ca_data,
-            peer_endpoint,
-            node_id,
-            peer_view=peer_view,
+            peer_address,
             show_all_partitions=show_all_partitions,
             json_output=json_output,
             timeout=timeout,
@@ -152,20 +152,18 @@ async def _run_inspect(
     key_data: str,
     ca_data: str,
     peer_endpoint: str,
-    target_node_id: str,
     *,
-    peer_view: bool,
     show_all_partitions: bool,
     json_output: bool,
     timeout: float,
 ) -> int:
-    """Connect to the peer endpoint and run the inspect command."""
+    """Connect to *peer_endpoint* and run the inspect command (self-inspect only)."""
     tls_ctx = build_client_ssl_context(cert_data, key_data, ca_data)
     client = TcpClient()
     try:
         await client.connect(peer_endpoint, tls_ctx)
     except OSError as exc:
-        _err_console.print(f"✗ Cannot connect to {peer_endpoint}: {exc}")
+        _err_console.print(f"✗ {peer_endpoint} is unreachable ({exc}).")
         return 1
 
     serializer = MsgpackSerializerAdapter()
@@ -174,11 +172,10 @@ async def _run_inspect(
         serializer=serializer,
         console=_console,
         err_console=_err_console,
+        target_address=peer_endpoint,
     )
     try:
         return await cmd.run(
-            target_node_id,
-            peer_view=peer_view,
             show_all_partitions=show_all_partitions,
             json_output=json_output,
             timeout=timeout,

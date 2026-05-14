@@ -258,7 +258,11 @@ async def test_24_status_handler_active_plan() -> None:
     applicator._plan = plan
     applicator._handles = {
         1: TransferHandle(PartitionTransfer(1, "a", "self"), TransferState.RUNNING),
-        2: TransferHandle(PartitionTransfer(2, "a", "self"), TransferState.COMMITTED),
+        2: TransferHandle(
+            PartitionTransfer(2, "a", "self"),
+            TransferState.COMMITTED,
+            bytes_done=1024,  # non-zero → classified as active committed
+        ),
         3: TransferHandle(
             PartitionTransfer(3, "a", "self"),
             TransferState.FAILED,

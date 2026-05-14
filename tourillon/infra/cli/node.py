@@ -38,11 +38,9 @@ from tourillon.core.gossip.bootstrapper import (
 from tourillon.core.gossip.config import GossipConfig
 from tourillon.core.gossip.engine import GossipEngine
 from tourillon.core.handlers.gossip import register_gossip_handlers
-from tourillon.core.handlers.inspect import (
-    NodeInspectHandler,
-    NodeInspectPeerViewHandler,
-)
+from tourillon.core.handlers.inspect import NodeInspectHandler
 from tourillon.core.handlers.node_join import NodeJoinHandler
+from tourillon.core.handlers.rebalance import register_rebalance_handlers
 from tourillon.core.lifecycle.bootstrap import run_first_node_bootstrap
 from tourillon.core.lifecycle.checks import (
     NodeIdMismatchError,
@@ -52,10 +50,14 @@ from tourillon.core.lifecycle.checks import (
 from tourillon.core.lifecycle.member import Member, MemberPhase
 from tourillon.core.lifecycle.probe import ProbeManager
 from tourillon.core.lifecycle.state import NodeState
+from tourillon.core.rebalance.applicator import RebalanceApplicator
+from tourillon.core.rebalance.planner import RebalancePlanner
 from tourillon.core.ring.hashspace import HashSpace
 from tourillon.core.ring.partitioner import Partitioner
 from tourillon.core.ring.topology import TopologyManager
+from tourillon.core.ring.vnode import VNode
 from tourillon.core.structure.config import NodeSize, TourillonConfig
+from tourillon.core.testing.mem_storage import InMemoryStorage
 from tourillon.core.transport.dispatcher import Dispatcher
 from tourillon.core.transport.server import TcpServer
 from tourillon.infra.serializer.msgpack import MsgpackSerializerAdapter
@@ -67,6 +69,18 @@ node_app = typer.Typer(no_args_is_help=True)
 
 _KV_PHASES = frozenset({MemberPhase.READY, MemberPhase.DRAINING})
 _BOOTSTRAP_PHASES = frozenset({MemberPhase.JOINING, MemberPhase.DRAINING})
+# Rebalance handlers are registered on every peer dispatcher unconditionally,
+# even when the node starts in IDLE.  A node that starts IDLE may transition
+# to JOINING at runtime via `tourctl node join`, and the operator must be
+# able to query `rebalance.status` immediately afterwards.  Since the
+# Dispatcher is built once at startup, registering only for the startup
+# phase would leave the handlers permanently absent — causing
+# `Unknown envelope kind 'rebalance.status'` and `ConnectionClosedError`
+# on the operator side.  Read-only handlers like `rebalance.status` report
+# "no active rebalance" gracefully when called outside a rebalance window.
+# The `_watch_rebalance_and_transition` task remains gated on the JOINING/
+# DRAINING startup phase since it drives the FSM transition.
+_REBALANCE_WATCH_PHASES = frozenset({MemberPhase.JOINING, MemberPhase.DRAINING})
 
 
 @node_app.command("start")
@@ -273,14 +287,23 @@ def _build_peer_dispatcher(
     launch_bootstrap: object,
     peer_address: str,
     kv_address: str,
+    applicator: RebalanceApplicator | None = None,
+    storage: InMemoryStorage | None = None,
 ) -> Dispatcher:
     """Construct and return a fully-wired Dispatcher for the peer server.
 
-    Instantiates every peer-server handler (inspect, peer-view, join, gossip)
-    and registers them against a fresh Dispatcher. Extracted from _run_phase so
-    that the wiring can be tested independently — a TypeError from a mismatched
-    constructor argument is caught immediately without requiring real sockets
-    or TLS credentials.
+    Instantiates every peer-server handler (inspect, peer-view, join, gossip,
+    rebalance) and registers them against a fresh Dispatcher. Extracted from
+    _run_phase so that the wiring can be tested independently — a TypeError
+    from a mismatched constructor argument is caught immediately without
+    requiring real sockets or TLS credentials.
+
+    The three rebalance handlers (plan, transfer, status) are registered
+    whenever both ``applicator`` and ``storage`` are supplied. Production
+    callers always pass them so that the handlers are available for every
+    startup phase, including IDLE — a freshly-started IDLE node must answer
+    `rebalance.status` queries once it transitions to JOINING via
+    `tourctl node join`, and the Dispatcher is only built once at startup.
 
     The returned Dispatcher is ready to hand to TcpServer.
     """
@@ -294,15 +317,7 @@ def _build_peer_dispatcher(
         kv_address=kv_address,
         size=str(cfg.node_size),
         serializer=serializer,
-        tls_ctx=client_ssl_ctx,
-        attempt_timeout=cfg.join.attempt_timeout,
         get_gossip_stats=lambda: engine.stats.to_dict(),
-    )
-    peer_view_handler = NodeInspectPeerViewHandler(
-        node_id=cfg.node_id,
-        topology_manager=topology_mgr,
-        probe_manager=probe_mgr,
-        serializer=serializer,
     )
     join_handler = NodeJoinHandler(
         node_id=cfg.node_id,
@@ -331,8 +346,25 @@ def _build_peer_dispatcher(
         serializer,
     )
     peer_dispatcher.register("node.inspect", inspect_handler)
-    peer_dispatcher.register("node.inspect.peer_view", peer_view_handler)
     peer_dispatcher.register("node.join", join_handler)
+
+    if applicator is not None and storage is not None:
+        register_rebalance_handlers(
+            dispatcher=peer_dispatcher,
+            node_id=cfg.node_id,
+            epoch=state_ref[0].epoch,
+            storage=storage,  # type: ignore[arg-type]
+            state_port=state_port,
+            applicator=applicator,
+            serializer=serializer,
+            max_chunk_bytes=cfg.rebalance.max_chunk_bytes,
+        )
+        logger.debug(
+            "Rebalance handlers registered (epoch=%d, phase=%s).",
+            state_ref[0].epoch,
+            state_ref[0].phase,
+        )
+
     return peer_dispatcher
 
 
@@ -366,6 +398,26 @@ async def _run_phase(
 
     state_ref: list[NodeState] = [effective]
     gossip_config = GossipConfig()
+
+    # Build rebalance infrastructure unconditionally so that the peer
+    # dispatcher always carries the three rebalance handlers, regardless of
+    # the startup phase.  This avoids `Unknown envelope kind 'rebalance.*'`
+    # / `ConnectionClosedError` when an operator queries a freshly-started
+    # IDLE node — or queries any node that later transitions to JOINING /
+    # DRAINING without a daemon restart.  The cost (one empty InMemoryStorage
+    # plus a quiescent RebalanceApplicator) is negligible.
+    rebalance_storage: InMemoryStorage = InMemoryStorage()
+    rebalance_applicator: RebalanceApplicator = RebalanceApplicator(
+        node_id=cfg.node_id,
+        pool=container.pool,
+        state_port=state_port,
+        storage=rebalance_storage,  # type: ignore[arg-type]
+        serializer=container.serializer,
+        peer_addresses={},  # populated after gossip bootstrap
+        max_concurrent_transfers=cfg.rebalance.max_concurrent_transfers,
+        max_chunk_bytes=cfg.rebalance.max_chunk_bytes,
+        total_partitions=partitioner.total_partitions,
+    )
 
     engine = GossipEngine(
         node_id=cfg.node_id,
@@ -415,6 +467,8 @@ async def _run_phase(
         launch_bootstrap=launch_bootstrap,
         peer_address=peer_address,
         kv_address=kv_address,
+        applicator=rebalance_applicator,
+        storage=rebalance_storage,
     )
 
     peer_host, peer_port = _parse_bind(cfg.peer_server.bind)
@@ -442,6 +496,9 @@ async def _run_phase(
         state_ref,
         gossip_config,
         engine,
+        applicator=rebalance_applicator,
+        storage=rebalance_storage,
+        partitioner=partitioner,
     )
 
     loop = asyncio.get_running_loop()
@@ -451,8 +508,45 @@ async def _run_phase(
         async with asyncio.TaskGroup() as tg:
             tg.create_task(_wait_for_stop(stop, engine), name="shutdown.waiter")
             tg.create_task(engine.start(), name="gossip.engine")
+            if phase in _REBALANCE_WATCH_PHASES:
+                tg.create_task(
+                    _watch_rebalance_and_transition(
+                        applicator=rebalance_applicator,
+                        cfg=cfg,
+                        phase=phase,
+                        state_ref=state_ref,
+                        state_port=state_port,
+                        topology_mgr=topology_mgr,
+                        engine=engine,
+                        kv_server=kv_server,
+                        kv_host=kv_host,
+                        kv_port=kv_port,
+                        peer_address=peer_address,
+                        stop=stop,
+                    ),
+                    name="rebalance.watcher",
+                )
     else:
-        await _await_engine_start_or_stop(stop, start_engine_event, engine)
+        # IDLE startup: wait for tourctl node join to complete gossip bootstrap.
+        # When start_engine_event fires the node is in JOINING; set up the
+        # rebalance plan and start the engine + watcher in a TaskGroup so
+        # JOINING → READY is driven the same way as a daemon that starts
+        # directly in JOINING phase.
+        await _await_engine_start_or_stop(
+            stop=stop,
+            start_engine_event=start_engine_event,
+            engine=engine,
+            cfg=cfg,
+            state_ref=state_ref,
+            state_port=state_port,
+            topology_mgr=topology_mgr,
+            partitioner=partitioner,
+            applicator=rebalance_applicator,
+            kv_server=kv_server,
+            kv_host=kv_host,
+            kv_port=kv_port,
+            peer_address=peer_address,
+        )
 
     logger.info("Shutdown signal received; stopping node %r.", cfg.node_id)
     await peer_server.stop()
@@ -460,6 +554,226 @@ async def _run_phase(
         await kv_server.stop()
     await container.pool.close_all()
     logger.info("Node %r stopped cleanly.", cfg.node_id)
+
+
+async def _watch_rebalance_and_transition(
+    applicator: RebalanceApplicator,
+    cfg: TourillonConfig,
+    phase: MemberPhase,
+    state_ref: list[NodeState],
+    state_port: FileStateAdapter,
+    topology_mgr: TopologyManager,
+    engine: GossipEngine,
+    kv_server: TcpServer,
+    kv_host: str,
+    kv_port: int,
+    peer_address: str,
+    stop: asyncio.Event,
+) -> None:
+    """Await rebalance completion and drive the JOINING→READY or DRAINING→IDLE transition.
+
+    Runs concurrently with GossipEngine inside the main TaskGroup.  Waits for
+    either `applicator.wait_for_completion()` or `stop` to fire, whichever
+    comes first.
+
+    When all transfers succeed and stop has not been requested:
+
+    * JOINING → READY:
+      1. Persist phase=READY in state.toml (write-before-announce invariant).
+      2. Bind the KV socket (KV-socket-lifecycle invariant).
+      3. Announce MemberPhase.READY via GossipEngine.
+
+    * DRAINING → IDLE:
+      1. Persist phase=IDLE in state.toml.
+      2. Announce MemberPhase.IDLE via GossipEngine then signal stop.
+
+    When any transfer fails the node stays in its current phase.
+    """
+    failed = await _await_rebalance_or_stop(applicator, stop)
+    if failed is None:
+        return
+    if failed:
+        logger.warning(
+            "Node %r: rebalance blocked — %d pid(s) failed. "
+            "Phase %r NOT advanced. Resolve with `tourctl rebalance status --blocked`.",
+            cfg.node_id,
+            len(failed),
+            str(phase),
+        )
+        return
+    if phase == MemberPhase.JOINING:
+        await _transition_joining_to_ready(
+            cfg,
+            state_ref,
+            state_port,
+            topology_mgr,
+            engine,
+            kv_server,
+            kv_host,
+            kv_port,
+            peer_address,
+        )
+    elif phase == MemberPhase.DRAINING:
+        await _transition_draining_to_idle(
+            cfg, state_ref, state_port, topology_mgr, engine, peer_address, stop
+        )
+
+
+async def _await_rebalance_or_stop(
+    applicator: RebalanceApplicator,
+    stop: asyncio.Event,
+) -> list[int] | None:
+    """Race completion against stop; return failed_pids list or None on stop."""
+    completion_future: asyncio.Future[tuple[list[int], list[int]]] = (
+        asyncio.get_running_loop().create_future()
+    )
+
+    async def _do_wait() -> None:
+        result = await applicator.wait_for_completion()
+        if not completion_future.done():
+            completion_future.set_result(result)
+
+    comp_task = asyncio.get_running_loop().create_task(_do_wait())
+    stop_task = asyncio.get_running_loop().create_task(stop.wait())
+    _, pending = await asyncio.wait(
+        {comp_task, stop_task}, return_when=asyncio.FIRST_COMPLETED
+    )
+    for t in pending:
+        t.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await t
+    if stop.is_set() and not completion_future.done():
+        logger.info("Rebalance watcher: stop requested; aborting phase watch.")
+        return None
+    if not completion_future.done():
+        return None
+    _, failed = completion_future.result()
+    return failed
+
+
+async def _transition_joining_to_ready(
+    cfg: TourillonConfig,
+    state_ref: list[NodeState],
+    state_port: FileStateAdapter,
+    topology_mgr: TopologyManager,
+    engine: GossipEngine,
+    kv_server: TcpServer,
+    kv_host: str,
+    kv_port: int,
+    peer_address: str,
+) -> None:
+    """Execute JOINING → READY: persist state, open KV socket, gossip READY.
+
+    Follows the write-before-announce invariant and the KV-socket-lifecycle
+    invariant: state is persisted before any network action, and the KV socket
+    is only bound after the persist succeeds.
+    """
+    state = state_ref[0]
+    new_seq = state.seq + 1
+    new_state = NodeState(
+        node_id=state.node_id,
+        phase=MemberPhase.READY,
+        generation=state.generation,
+        seq=new_seq,
+        tokens=state.tokens,
+        epoch=state.epoch,
+        committed_pids=state.committed_pids,
+        staging_pids=(),
+    )
+    try:
+        await state_port.save(new_state)
+    except Exception:
+        logger.exception(
+            "JOINING → READY: failed to persist state; aborting transition."
+        )
+        return
+    state_ref[0] = new_state
+    logger.info(
+        "Node %r: JOINING → READY phase persisted (epoch %d).",
+        cfg.node_id,
+        new_state.epoch,
+    )
+
+    try:
+        kv_host_parsed, kv_port_parsed = kv_host, kv_port
+        await kv_server.start(kv_host_parsed, kv_port_parsed)
+        logger.info("Node %r: KV socket bound at %s:%d.", cfg.node_id, kv_host, kv_port)
+    except Exception:
+        logger.exception("JOINING → READY: failed to bind KV socket.")
+        return
+
+    ready_member = Member(
+        node_id=cfg.node_id,
+        peer_address=peer_address,
+        generation=new_state.generation,
+        seq=new_seq,
+        phase=MemberPhase.READY,
+        tokens=new_state.tokens,
+        partition_shift=cfg.partition_shift,
+    )
+    await topology_mgr.apply_member(ready_member)
+    await engine.announce(ready_member)
+    logger.info("Node %r: JOINING → READY complete; gossip.push queued.", cfg.node_id)
+
+
+async def _transition_draining_to_idle(
+    cfg: TourillonConfig,
+    state_ref: list[NodeState],
+    state_port: FileStateAdapter,
+    topology_mgr: TopologyManager,
+    engine: GossipEngine,
+    peer_address: str,
+    stop: asyncio.Event,
+) -> None:
+    """Execute DRAINING → IDLE: persist state, gossip IDLE, signal stop.
+
+    The KV socket is not closed here; it was open for reads during DRAINING and
+    will be closed by the main _run_phase cleanup once stop is set and the
+    TaskGroup exits. Setting stop here causes the shutdown sequence to close
+    both servers cleanly.
+    """
+    state = state_ref[0]
+    new_seq = state.seq + 1
+    new_state = NodeState(
+        node_id=state.node_id,
+        phase=MemberPhase.IDLE,
+        generation=state.generation,
+        seq=new_seq,
+        tokens=state.tokens,
+        epoch=state.epoch,
+        committed_pids=(),
+        staging_pids=(),
+    )
+    try:
+        await state_port.save(new_state)
+    except Exception:
+        logger.exception(
+            "DRAINING → IDLE: failed to persist state; aborting transition."
+        )
+        return
+    state_ref[0] = new_state
+    logger.info(
+        "Node %r: DRAINING → IDLE phase persisted (epoch %d).",
+        cfg.node_id,
+        new_state.epoch,
+    )
+
+    idle_member = Member(
+        node_id=cfg.node_id,
+        peer_address=peer_address,
+        generation=new_state.generation,
+        seq=new_seq,
+        phase=MemberPhase.IDLE,
+        tokens=new_state.tokens,
+        partition_shift=cfg.partition_shift,
+    )
+    await topology_mgr.apply_member(idle_member)
+    await engine.announce(idle_member)
+    logger.info(
+        "Node %r: DRAINING → IDLE complete; gossip.push queued. Signalling shutdown.",
+        cfg.node_id,
+    )
+    stop.set()
 
 
 async def _wait_for_stop(stop: asyncio.Event, engine: GossipEngine) -> None:
@@ -501,16 +815,34 @@ async def _await_engine_start_or_stop(
     stop: asyncio.Event,
     start_engine_event: asyncio.Event,
     engine: GossipEngine,
+    cfg: TourillonConfig,
+    state_ref: list[NodeState],
+    state_port: FileStateAdapter,
+    topology_mgr: TopologyManager,
+    partitioner: Partitioner,
+    applicator: RebalanceApplicator,
+    kv_server: TcpServer,
+    kv_host: str,
+    kv_port: int,
+    peer_address: str,
 ) -> None:
-    """Block until stop or until IDLE→JOINING bootstrap completes.
+    """Block until stop or until IDLE→JOINING bootstrap completes, then run the engine.
 
-    Called for IDLE nodes with seeds that received a tourctl node join command.
-    Uses asyncio.wait to react immediately to whichever event fires first —
-    no fixed polling interval. If start_engine_event fires (with or without
-    stop also set), GossipEngine is started in a TaskGroup so that the
-    hot_queue (pre-populated by _execute_launch_bootstrap) is drained and
-    the JOINING member is pushed to the cluster. If only stop fires (no join
-    was initiated), the function returns without starting the engine.
+    Called for IDLE nodes with seeds that received a ``tourctl node join``
+    command.  Uses asyncio.wait to react immediately to whichever event fires
+    first — no fixed polling interval.
+
+    If start_engine_event fires (with or without stop also set):
+
+    1. ``_setup_rebalance`` computes the rebalance plan using the freshly-
+       bootstrapped topology (ring from seeds includes all READY nodes, so
+       the partition assignments are correct).
+    2. A TaskGroup runs ``GossipEngine``, ``_watch_rebalance_and_transition``
+       (JOINING → READY driver), and ``_wait_for_stop`` concurrently — the
+       same structure as a daemon that starts directly in JOINING phase.
+
+    If only stop fires (no join was initiated) the function returns without
+    starting the engine.
     """
     pending = {
         asyncio.ensure_future(stop.wait()),
@@ -519,19 +851,46 @@ async def _await_engine_start_or_stop(
     done, pending_tasks = await asyncio.wait(
         pending, return_when=asyncio.FIRST_COMPLETED
     )
-    # Cancel the task that didn't fire yet.
     for task in pending_tasks:
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
 
-    # Start the engine if the join completed, even if stop also fired —
-    # the _wait_for_stop task inside the TaskGroup will drain it cleanly.
     if not start_engine_event.is_set():
         return
+
+    # state_ref[0] has been updated to JOINING by NodeJoinHandler before
+    # _execute_launch_bootstrap set start_engine_event.
+    joining_state = state_ref[0]
+    await _setup_rebalance(
+        cfg=cfg,
+        phase=MemberPhase.JOINING,
+        state=joining_state,
+        topology_mgr=topology_mgr,
+        applicator=applicator,
+        partitioner=partitioner,
+    )
+
     async with asyncio.TaskGroup() as tg:
         tg.create_task(_wait_for_stop(stop, engine), name="shutdown.waiter")
         tg.create_task(engine.start(), name="gossip.engine")
+        tg.create_task(
+            _watch_rebalance_and_transition(
+                applicator=applicator,
+                cfg=cfg,
+                phase=MemberPhase.JOINING,
+                state_ref=state_ref,
+                state_port=state_port,
+                topology_mgr=topology_mgr,
+                engine=engine,
+                kv_server=kv_server,
+                kv_host=kv_host,
+                kv_port=kv_port,
+                peer_address=peer_address,
+                stop=stop,
+            ),
+            name="rebalance.watcher",
+        )
 
 
 def _peer_address(cfg: TourillonConfig) -> str:
@@ -597,6 +956,9 @@ async def _startup_bootstrap_phase(
     client_ssl_ctx: object,
     serializer: object,
     engine: GossipEngine,
+    applicator: RebalanceApplicator | None = None,
+    storage: InMemoryStorage | None = None,
+    partitioner: Partitioner | None = None,
 ) -> bool:
     """Handle JOINING/DRAINING phase startup; return True (engine always started).
 
@@ -604,6 +966,11 @@ async def _startup_bootstrap_phase(
     Without this, AE ping/pong returns same=True and peers never learn about
     the joining node. The member is also announced onto the hot-queue so that
     gossip.push is sent to peers immediately on engine start.
+
+    After bootstrap, when an applicator is provided, computes the rebalance plan
+    from the current topology and applies it.  The plan's transfers are started
+    as background coroutines inside the applicator; their completion is monitored
+    by the _watch_rebalance_and_transition task running in the main TaskGroup.
     """
     own_member = Member(
         node_id=cfg.node_id,
@@ -619,7 +986,82 @@ async def _startup_bootstrap_phase(
         cfg, topology_mgr, gossip_config, client_ssl_ctx, serializer
     )
     await engine.announce(own_member)
+
+    if applicator is not None and partitioner is not None:
+        await _setup_rebalance(
+            cfg=cfg,
+            phase=phase,
+            state=state,
+            topology_mgr=topology_mgr,
+            applicator=applicator,
+            partitioner=partitioner,
+        )
+
     return True
+
+
+async def _setup_rebalance(
+    cfg: TourillonConfig,
+    phase: MemberPhase,
+    state: NodeState,
+    topology_mgr: TopologyManager,
+    applicator: RebalanceApplicator,
+    partitioner: Partitioner,
+) -> None:
+    """Compute and apply the rebalance plan after gossip bootstrap.
+
+    For JOINING: old_ring is the current ring (no self vnodes); new_ring adds
+    this node's vnodes so the planner can see which pids this node will own.
+
+    For DRAINING: old_ring is the current ring (includes self); new_ring is the
+    ring without this node's vnodes.
+
+    Crash recovery is performed before applying the new plan so that any
+    in-progress staging from a prior run is reconciled against the current
+    gossip epoch.
+    """
+    topo = await topology_mgr.snapshot()
+    self_vnodes = [VNode(node_id=cfg.node_id, token=t) for t in state.tokens]
+
+    if phase == MemberPhase.JOINING:
+        old_ring = topo.ring
+        new_ring = old_ring.add_vnodes(self_vnodes)
+    else:
+        old_ring = topo.ring
+        new_ring = old_ring.drop_nodes({cfg.node_id})
+
+    # Update peer addresses from the freshly-bootstrapped topology registry.
+    applicator._peer_addresses = {  # type: ignore[attr-defined]
+        m.node_id: m.peer_address for m in topo.registry
+    }
+
+    planner = RebalancePlanner(partitioner, cfg.rf)
+    plan = planner.plan(old_ring, new_ring, topo.epoch)
+
+    logger.info(
+        "Node %r: rebalance plan computed — epoch=%d ranges=%d (phase=%s).",
+        cfg.node_id,
+        plan.epoch,
+        len(plan.ranges),
+        str(phase),
+    )
+
+    # Crash recovery: reconcile persisted staging state with current epoch.
+    stored_epoch = state.epoch
+    gossip_epoch = topo.epoch
+    await applicator.crash_recover(
+        stored_epoch=stored_epoch,
+        gossip_epoch=gossip_epoch,
+        staging_pids=state.staging_pids,
+        committed_pids=state.committed_pids,
+    )
+
+    await applicator.apply(plan)
+    logger.info(
+        "Node %r: rebalance applicator started — %d pid(s) to transfer.",
+        cfg.node_id,
+        len(plan.expand()),
+    )
 
 
 async def _startup_phase_logic(
@@ -633,6 +1075,9 @@ async def _startup_phase_logic(
     state_ref: list[NodeState],
     gossip_config: GossipConfig,
     engine: GossipEngine,
+    applicator: RebalanceApplicator | None = None,
+    storage: InMemoryStorage | None = None,
+    partitioner: Partitioner | None = None,
 ) -> bool:
     """Dispatch to the phase-specific startup helper; return True if engine should start."""
     if phase == MemberPhase.IDLE:
@@ -649,6 +1094,9 @@ async def _startup_phase_logic(
             client_ssl_ctx,
             serializer,
             engine,
+            applicator=applicator,
+            storage=storage,
+            partitioner=partitioner,
         )
     if phase == MemberPhase.PAUSED:
         logger.info(
@@ -663,7 +1111,7 @@ async def _startup_phase_logic(
         )
         return False
 
-    return False
+    return False  # pragma: no cover
 
 
 async def _bootstrap_first_node(

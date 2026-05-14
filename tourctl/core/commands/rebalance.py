@@ -19,7 +19,11 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from tourctl.core.ports.console import ConsolePort
-from tourillon.core.ports.transport import RESPONSE_TIMEOUT, ResponseTimeoutError
+from tourillon.core.ports.transport import (
+    RESPONSE_TIMEOUT,
+    ConnectionClosedError,
+    ResponseTimeoutError,
+)
 from tourillon.core.structure.envelope import Envelope
 from tourillon.core.transport.client import TcpClient
 
@@ -74,6 +78,20 @@ class RebalanceStatusCommand:
         except ResponseTimeoutError:
             self._err_console.print(
                 f"✗ Rebalance status timed out after {timeout:.0f}s."
+            )
+            return 1
+        except ConnectionClosedError:
+            # The peer dropped the connection without a response envelope.
+            # Most common cause: the daemon does not have the
+            # `rebalance.status` handler registered (older build, or daemon
+            # built its dispatcher before the rebalance handlers were
+            # wired).  Surface a clear operator-facing message instead of
+            # the raw transport exception.
+            self._err_console.print(
+                "✗ Peer closed the connection before responding to "
+                "`rebalance.status`. The daemon may not have the "
+                "rebalance handlers registered — upgrade the node or "
+                "restart it after the JOINING transition."
             )
             return 1
 

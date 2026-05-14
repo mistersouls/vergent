@@ -53,6 +53,11 @@ class RebalanceApplicator:
     removed from the plan have their cancel_event set; pids added start new
     coroutines; pids in the intersection continue unchanged.
 
+    crash_recover() must be called on startup before apply() when the node
+    restarts mid-transfer. It reconciles persisted state with the current
+    gossip epoch, cleans up stale staging entries, and auto-heals pids whose
+    LMDB transaction committed before state.toml was updated.
+
     status() returns a paginated dict for the rebalance.status wire response.
     The applicator enforces the WaitGroup invariant: the phase transition
     (JOINING → READY or DRAINING → IDLE) is only signalled when wait() returns
@@ -69,6 +74,7 @@ class RebalanceApplicator:
         peer_addresses: dict[str, str],
         max_concurrent_transfers: int = 4,
         max_chunk_bytes: int = 1_048_576,
+        total_partitions: int | None = None,
     ) -> None:
         self._node_id = node_id
         self._pool = pool
@@ -78,11 +84,116 @@ class RebalanceApplicator:
         self._peer_addresses = peer_addresses
         self._max_concurrent = max_concurrent_transfers
         self._max_chunk_bytes = max_chunk_bytes
+        self._total_partitions = total_partitions
         self._handles: dict[int, TransferHandle] = {}
         self._plan: RebalancePlan | None = None
         self._wg: WaitGroup[int] = WaitGroup()
         self._semaphore = asyncio.Semaphore(max_concurrent_transfers)
         self._tasks: dict[int, asyncio.Task[None]] = {}
+        # Serialises concurrent state.toml writes from parallel transfer tasks.
+        self._state_lock = asyncio.Lock()
+
+    async def crash_recover(
+        self,
+        stored_epoch: int,
+        gossip_epoch: int,
+        staging_pids: tuple[int, ...],
+        committed_pids: tuple[int, ...],
+    ) -> None:
+        """Startup reconciliation: detect epoch drift and repair stale state.
+
+        Step 1 — if stored_epoch < gossip_epoch (epoch drift): clean up all
+        staging entries under the old epoch for each pid in staging_pids, then
+        rewrite state.toml with epoch=gossip_epoch and an empty staging_pids.
+
+        Step 2 — if stored_epoch == gossip_epoch (same epoch): for each pid in
+        staging_pids, check exists(). When exists() is False the LMDB
+        transaction already committed the staging entries to the committed tag
+        before the process crashed; state.toml was not yet updated. Auto-heal
+        by moving those pids from staging_pids to committed_pids.
+
+        Call this method before apply() whenever the node restarts while a
+        transfer was in progress.
+        """
+        state = await self._state_port.load()
+        if state is None:
+            return
+
+        if stored_epoch < gossip_epoch:
+            await self._recover_epoch_drift(
+                state, stored_epoch, gossip_epoch, staging_pids
+            )
+            return
+
+        await self._recover_same_epoch(
+            state, stored_epoch, staging_pids, committed_pids
+        )
+
+    async def _recover_epoch_drift(
+        self,
+        state: NodeState,
+        stored_epoch: int,
+        gossip_epoch: int,
+        staging_pids: tuple[int, ...],
+    ) -> None:
+        """Clean up stale staging entries and update epoch in state.toml."""
+        for pid in staging_pids:
+            staging = self._storage.open_partition(pid).staging(stored_epoch)
+            await staging.cleanup()
+            logger.debug(
+                "crash_recover: cleaned up stale staging pid=%d epoch=%d",
+                pid,
+                stored_epoch,
+            )
+        new_state = NodeState(
+            node_id=state.node_id,
+            phase=state.phase,
+            generation=state.generation,
+            seq=state.seq,
+            tokens=state.tokens,
+            epoch=gossip_epoch,
+            committed_pids=state.committed_pids,
+            staging_pids=(),
+        )
+        await self._state_port.save(new_state)
+        logger.info(
+            "crash_recover: epoch drift %d→%d; cleared %d staging pids",
+            stored_epoch,
+            gossip_epoch,
+            len(staging_pids),
+        )
+
+    async def _recover_same_epoch(
+        self,
+        state: NodeState,
+        epoch: int,
+        staging_pids: tuple[int, ...],
+        committed_pids: tuple[int, ...],
+    ) -> None:
+        """Auto-heal pids where LMDB committed but state.toml was not updated."""
+        auto_healed: list[int] = []
+        for pid in staging_pids:
+            staging = self._storage.open_partition(pid).staging(epoch)
+            if not await staging.exists():
+                auto_healed.append(pid)
+                logger.info("crash_recover: auto-heal pid=%d (LMDB committed)", pid)
+
+        if not auto_healed:
+            return
+
+        new_committed = committed_pids + tuple(auto_healed)
+        new_staging = tuple(p for p in staging_pids if p not in auto_healed)
+        new_state = NodeState(
+            node_id=state.node_id,
+            phase=state.phase,
+            generation=state.generation,
+            seq=state.seq,
+            tokens=state.tokens,
+            epoch=state.epoch,
+            committed_pids=new_committed,
+            staging_pids=new_staging,
+        )
+        await self._state_port.save(new_state)
 
     async def apply(self, new_plan: RebalancePlan) -> None:
         """Diff against current plan; cancel removed pids, start added pids."""
@@ -98,6 +209,7 @@ class RebalanceApplicator:
 
         self._plan = new_plan
 
+        started = 0
         for transfer in new_plan.expand():
             if transfer.pid not in to_start:
                 continue
@@ -109,9 +221,59 @@ class RebalanceApplicator:
             await self._wg.add(1)
             task = asyncio.get_running_loop().create_task(self._run_transfer(handle))
             self._tasks[transfer.pid] = task
+            started += 1
+
+        if to_cancel:
+            logger.info(
+                "Rebalance apply (node=%s, epoch=%d): %d transfer(s) queued, "
+                "%d cancelled.",
+                self._node_id,
+                new_plan.epoch,
+                started,
+                len(to_cancel),
+            )
+        else:
+            logger.info(
+                "Rebalance apply (node=%s, epoch=%d): %d transfer(s) queued "
+                "(concurrency=%d).",
+                self._node_id,
+                new_plan.epoch,
+                started,
+                self._max_concurrent,
+            )
+
+    async def wait_for_completion(self) -> tuple[list[int], list[int]]:
+        """Await all active transfers; return (success_pids, failed_pids).
+
+        Suspends until every pid added via apply() has been marked done by its
+        transfer coroutine.  When the active plan is empty (ranges == ()) the
+        WaitGroup counter is zero and this method returns immediately with two
+        empty lists — the caller may then advance the phase without any work.
+
+        The JOINING → READY or DRAINING → IDLE transition MUST NOT be executed
+        when failed_pids is non-empty (phase-guard invariant §7).  The caller
+        is responsible for checking the returned failed list before transitioning.
+        """
+        success, failed = await self._wg.wait()
+        logger.info(
+            "Rebalance complete (node=%s): committed=%d failed=%d.",
+            self._node_id,
+            len(success),
+            len(failed),
+        )
+        return success, failed
 
     async def status(self, after_pid: int = 0, limit: int = 500) -> dict[str, Any]:
-        """Return paginated status dict suitable for wire encoding."""
+        """Return paginated status dict suitable for wire encoding.
+
+        A handle is *inactive* when it reached COMMITTED with bytes_done == 0:
+        the partition existed in the ring but contained no records to transfer.
+        Inactive handles are excluded from the transfer table and from the
+        active_partitions counter; they are counted in inactive_partitions.
+        Handles in non-terminal states (PENDING, RUNNING) or terminal-but-non-
+        empty states (COMMITTED with data, FAILED, CANCELLED) are always
+        *active* and appear in the table.
+        """
         plan = self._plan
         epoch: int | None = plan.epoch if plan else None
         trigger = self._infer_trigger()
@@ -125,21 +287,30 @@ class RebalanceApplicator:
             "cancelled": 0,
         }
         blocked = False
+        empty_committed = 0
 
         for h in self._handles.values():
+            if h.state == TransferState.COMMITTED and h.bytes_done == 0:
+                empty_committed += 1
+                continue
             key = h.state.value
             if key in summary:
                 summary[key] += 1
             if h.state == TransferState.FAILED:
                 blocked = True
 
-        active_partitions = len(self._handles)
+        active_partitions = len(self._handles) - empty_committed
         total_owned = self._total_owned()
         inactive_partitions = max(0, total_owned - active_partitions)
 
-        page = [pid for pid in sorted(self._handles.keys()) if pid > after_pid][:limit]
+        active_pids = [
+            pid
+            for pid, h in self._handles.items()
+            if not (h.state == TransferState.COMMITTED and h.bytes_done == 0)
+        ]
+        page = [pid for pid in sorted(active_pids) if pid > after_pid][:limit]
         has_more = len(page) == limit and (
-            max(page) < max(self._handles.keys()) if page and self._handles else False
+            max(page) < max(active_pids) if page and active_pids else False
         )
         next_pid: int | None = page[-1] if has_more else None
 
@@ -171,6 +342,12 @@ class RebalanceApplicator:
             if handle.cancel_event.is_set():
                 await self._on_cancelled(handle)
                 return
+            logger.debug(
+                "pid=%d semaphore acquired (src=%s dst=%s).",
+                pid,
+                handle.transfer.src,
+                handle.transfer.dst,
+            )
             await self._attempt_transfer(handle)
 
     async def _attempt_transfer(self, handle: TransferHandle) -> None:
@@ -474,6 +651,7 @@ class RebalanceApplicator:
         """Mark handle as committed and signal the WaitGroup."""
         handle.state = TransferState.COMMITTED
         handle.finished_at = datetime.now(UTC)
+        logger.debug("pid=%d committed.", handle.transfer.pid)
         await self._wg.done(handle.transfer.pid, True)
 
     async def _on_failed(self, handle: TransferHandle, error: str) -> None:
@@ -481,6 +659,13 @@ class RebalanceApplicator:
         handle.state = TransferState.FAILED
         handle.last_error = error
         handle.finished_at = datetime.now(UTC)
+        logger.error(
+            "pid=%d permanently failed (src=%s dst=%s): %s",
+            handle.transfer.pid,
+            handle.transfer.src,
+            handle.transfer.dst,
+            error,
+        )
         await self._wg.done(handle.transfer.pid, False)
 
     async def _on_cancelled(self, handle: TransferHandle) -> None:
@@ -497,24 +682,31 @@ class RebalanceApplicator:
         await self._wg.done(pid, False)
 
     async def _update_state_committed(self, pid: int) -> None:
-        """Move pid from staging_pids to committed_pids in state.toml."""
-        state = await self._state_port.load()
-        if state is None:
-            return
-        new_staging = tuple(p for p in state.staging_pids if p != pid)
-        new_committed = state.committed_pids + (pid,)
-        await self._state_port.save(
-            NodeState(
-                node_id=state.node_id,
-                phase=state.phase,
-                generation=state.generation,
-                seq=state.seq,
-                tokens=state.tokens,
-                epoch=state.epoch,
-                committed_pids=new_committed,
-                staging_pids=new_staging,
+        """Move pid from staging_pids to committed_pids in state.toml.
+
+        Uses _state_lock to serialise concurrent writes: parallel transfer
+        coroutines all call this method simultaneously, and os.replace() on
+        Windows raises WinError 32 when two processes race on the same temp
+        file.  The lock ensures only one load-modify-save runs at a time.
+        """
+        async with self._state_lock:
+            state = await self._state_port.load()
+            if state is None:
+                return
+            new_staging = tuple(p for p in state.staging_pids if p != pid)
+            new_committed = state.committed_pids + (pid,)
+            await self._state_port.save(
+                NodeState(
+                    node_id=state.node_id,
+                    phase=state.phase,
+                    generation=state.generation,
+                    seq=state.seq,
+                    tokens=state.tokens,
+                    epoch=state.epoch,
+                    committed_pids=new_committed,
+                    staging_pids=new_staging,
+                )
             )
-        )
 
     def _infer_trigger(self) -> str:
         """Return 'joining' or 'draining' based on transfer directions."""
@@ -524,7 +716,15 @@ class RebalanceApplicator:
         return "draining"
 
     def _total_owned(self) -> int:
-        """Return total owned partition count (placeholder — injected by bootstrap)."""
+        """Return total owned partition count.
+
+        When total_partitions was injected at construction, returns that value
+        (for accurate inactive_partitions calculation). Otherwise falls back to
+        the active handle count (both active and inactive appear as active when
+        total_partitions is unknown).
+        """
+        if self._total_partitions is not None:
+            return self._total_partitions
         return len(self._handles)
 
     @staticmethod

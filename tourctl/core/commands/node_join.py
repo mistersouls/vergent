@@ -103,11 +103,15 @@ class NodeJoinCommand:
             data: dict[str, Any] = self._serializer.decode(resp.payload)
             node_id = data.get("node_id", "")
             phase = data.get("phase", "joining")
+            peer_address = data.get("peer_address", "") or self._peer_address
         except Exception:
             node_id = ""
             phase = "joining"
+            peer_address = self._peer_address
 
         self._console.print(f"Seeded join initiated for node {node_id!r}.")
         self._console.print(f"Phase → {phase}.")
-        self._console.print(f"Monitor progress with: tourctl node inspect {node_id}")
+        self._console.print(
+            f"Monitor progress with: tourctl node inspect {peer_address}"
+        )
         return 0

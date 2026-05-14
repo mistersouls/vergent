@@ -150,7 +150,7 @@ class InMemoryStorage:
 def _hlc_key(rec: Record) -> tuple[int, int, str]:
     """Return a sortable (wall_ms, counter, node_id) tuple from a record."""
     hlc: HLCTimestamp = rec.metadata
-    return (hlc.wall_ms, hlc.counter, hlc.node_id)
+    return hlc.wall_ms, hlc.counter, hlc.node_id
 
 
 def _parse_cursor_hlc(cursor: bytes) -> tuple[int, int]:

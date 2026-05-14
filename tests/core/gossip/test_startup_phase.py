@@ -89,21 +89,75 @@ async def test_7_draining_restart_binds_peer_and_kv() -> None:
 @pytest.mark.gossip
 async def test_8_paused_peer_only_no_gossip_bootstrap() -> None:
     """Peer server bound; KV server NOT bound; no gossip bootstrap; log indicates behaviour out of scope."""
-    from tourillon.infra.cli.node import _BOOTSTRAP_PHASES, _KV_PHASES
+    from tourillon.infra.cli.node import (
+        _BOOTSTRAP_PHASES,
+        _KV_PHASES,
+        _REBALANCE_WATCH_PHASES,
+    )
 
     phase = MemberPhase.PAUSED
     assert phase not in _KV_PHASES
     assert phase not in _BOOTSTRAP_PHASES
+    assert phase not in _REBALANCE_WATCH_PHASES
 
 
 @pytest.mark.gossip
 async def test_9_failed_peer_only_no_gossip_warning() -> None:
     """Peer server bound; KV server NOT bound; no gossip bootstrap; WARNING logged."""
-    from tourillon.infra.cli.node import _BOOTSTRAP_PHASES, _KV_PHASES
+    from tourillon.infra.cli.node import (
+        _BOOTSTRAP_PHASES,
+        _KV_PHASES,
+        _REBALANCE_WATCH_PHASES,
+    )
 
     phase = MemberPhase.FAILED
     assert phase not in _KV_PHASES
     assert phase not in _BOOTSTRAP_PHASES
+    assert phase not in _REBALANCE_WATCH_PHASES
+
+
+@pytest.mark.gossip
+async def test_ready_node_not_in_rebalance_watch_phases() -> None:
+    """READY does not drive a phase transition, so _watch_rebalance_and_transition is not started.
+
+    Rebalance handlers are still registered on the peer dispatcher
+    unconditionally (verified by `test_build_peer_dispatcher_*`), so a
+    READY node still answers `rebalance.status` queries.
+    """
+    from tourillon.infra.cli.node import _REBALANCE_WATCH_PHASES
+
+    assert MemberPhase.READY not in _REBALANCE_WATCH_PHASES
+
+
+@pytest.mark.gossip
+async def test_joining_node_in_rebalance_watch_phases() -> None:
+    """JOINING starts the watch task that drives JOINING → READY."""
+    from tourillon.infra.cli.node import _REBALANCE_WATCH_PHASES
+
+    assert MemberPhase.JOINING in _REBALANCE_WATCH_PHASES
+
+
+@pytest.mark.gossip
+async def test_draining_node_in_rebalance_watch_phases() -> None:
+    """DRAINING starts the watch task that drives DRAINING → IDLE."""
+    from tourillon.infra.cli.node import _REBALANCE_WATCH_PHASES
+
+    assert MemberPhase.DRAINING in _REBALANCE_WATCH_PHASES
+
+
+@pytest.mark.gossip
+async def test_idle_node_not_in_rebalance_watch_phases() -> None:
+    """IDLE does not drive a phase transition itself; the watch task is not started.
+
+    The three rebalance handlers (plan, transfer, status) are however
+    registered on the peer dispatcher unconditionally so that an IDLE
+    node can answer `rebalance.status` queries immediately after
+    transitioning to JOINING via `tourctl node join` — without a daemon
+    restart.
+    """
+    from tourillon.infra.cli.node import _REBALANCE_WATCH_PHASES
+
+    assert MemberPhase.IDLE not in _REBALANCE_WATCH_PHASES
 
 
 @pytest.mark.gossip
@@ -926,14 +980,40 @@ async def test_await_engine_start_or_stop_stop_signal_returns_immediately() -> N
 
     stop.set()  # already stopped before entering
 
-    await _await_engine_start_or_stop(stop, start_engine_event, mock_engine)
+    # Stub out _setup_rebalance so it is never reached (stop fires first).
+    with patch(
+        "tourillon.infra.cli.node._setup_rebalance", new=AsyncMock()
+    ) as mock_setup:
+        await _await_engine_start_or_stop(
+            stop=stop,
+            start_engine_event=start_engine_event,
+            engine=mock_engine,
+            cfg=MagicMock(),
+            state_ref=[MagicMock()],
+            state_port=MagicMock(),
+            topology_mgr=MagicMock(),
+            partitioner=MagicMock(),
+            applicator=MagicMock(),
+            kv_server=MagicMock(),
+            kv_host="127.0.0.1",
+            kv_port=17700,
+            peer_address="127.0.0.1:17701",
+        )
 
     mock_engine.start.assert_not_awaited()
+    mock_setup.assert_not_awaited()
 
 
 @pytest.mark.gossip
-async def test_await_engine_start_or_stop_starts_engine_after_join() -> None:
-    """_await_engine_start_or_stop starts GossipEngine when start_engine_event fires."""
+async def test_await_engine_start_or_stop_starts_engine_and_watcher_after_join() -> (
+    None
+):
+    """_await_engine_start_or_stop starts GossipEngine and rebalance watcher when start_engine_event fires.
+
+    After the fix, the function also calls _setup_rebalance and spawns
+    _watch_rebalance_and_transition — the root cause of JOINING nodes never
+    transitioning to READY when the daemon started in IDLE phase.
+    """
     from tourillon.infra.cli.node import _await_engine_start_or_stop
 
     stop = asyncio.Event()
@@ -943,26 +1023,59 @@ async def test_await_engine_start_or_stop_starts_engine_after_join() -> None:
 
     async def _fake_engine_start() -> None:
         engine_started.set()
-        await stop.wait()  # block until stop
+        await stop.wait()
 
     mock_engine = MagicMock()
     mock_engine.start = _fake_engine_start
     mock_engine.stop = AsyncMock()
 
+    setup_called = asyncio.Event()
+    watch_called = asyncio.Event()
+
+    async def _fake_setup(**_kwargs: object) -> None:
+        setup_called.set()
+
+    async def _fake_watch(**_kwargs: object) -> None:
+        watch_called.set()
+        await stop.wait()
+
     async def _trigger_then_stop() -> None:
         await asyncio.sleep(0.05)
         start_engine_event.set()
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.1)
         stop.set()
 
-    async with asyncio.TaskGroup() as tg:
-        tg.create_task(
-            _await_engine_start_or_stop(stop, start_engine_event, mock_engine),
-            name="test.await_engine",
-        )
-        tg.create_task(_trigger_then_stop(), name="test.trigger")
+    with (
+        patch("tourillon.infra.cli.node._setup_rebalance", new=_fake_setup),
+        patch(
+            "tourillon.infra.cli.node._watch_rebalance_and_transition",
+            new=_fake_watch,
+        ),
+    ):
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(
+                _await_engine_start_or_stop(
+                    stop=stop,
+                    start_engine_event=start_engine_event,
+                    engine=mock_engine,
+                    cfg=MagicMock(),
+                    state_ref=[MagicMock()],
+                    state_port=MagicMock(),
+                    topology_mgr=MagicMock(),
+                    partitioner=MagicMock(),
+                    applicator=MagicMock(),
+                    kv_server=MagicMock(),
+                    kv_host="127.0.0.1",
+                    kv_port=17700,
+                    peer_address="127.0.0.1:17701",
+                ),
+                name="test.await_engine",
+            )
+            tg.create_task(_trigger_then_stop(), name="test.trigger")
 
-    assert engine_started.is_set()
+    assert engine_started.is_set(), "GossipEngine must have been started"
+    assert setup_called.is_set(), "_setup_rebalance must be called on IDLE→JOINING"
+    assert watch_called.is_set(), "_watch_rebalance_and_transition must be spawned"
 
 
 @pytest.mark.gossip

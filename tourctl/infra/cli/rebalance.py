@@ -39,6 +39,12 @@ _DEFAULT_CONTEXTS_PATH = Path.home() / ".config" / "tourillon" / "contexts.toml"
 
 @rebalance_app.command("status")
 def rebalance_status(
+    peer_address: Annotated[
+        str,
+        typer.Argument(
+            help="Peer server address of the node to query (e.g. 127.0.0.1:7701)"
+        ),
+    ],
     after_pid: Annotated[
         int,
         typer.Option(
@@ -63,7 +69,7 @@ def rebalance_status(
     ] = RESPONSE_TIMEOUT,
     contexts_path: Annotated[Path, typer.Option("--contexts")] = _DEFAULT_CONTEXTS_PATH,
 ) -> None:
-    """Show the rebalance status of the active context's node.
+    """Show the rebalance status of the node at PEER_ADDRESS.
 
     Exit code 0 on success, 1 on any error, 2 when --blocked and the node
     is BLOCKED (one or more FAILED transfers).
@@ -83,17 +89,12 @@ def rebalance_status(
         _err_console.print("✗ No active context. Use `tourctl config use-context`.")
         raise typer.Exit(1)
 
-    peer_endpoint = ctx.endpoints.peer
-    if not peer_endpoint:
-        _err_console.print("✗ Active context has no peer endpoint configured.")
-        raise typer.Exit(1)
-
     exit_code = asyncio.run(
         _run_status(
             ctx.credentials.cert_data,
             ctx.credentials.key_data,
             ctx.cluster.ca_data,
-            peer_endpoint,
+            peer_address,
             after_pid=after_pid,
             limit=limit,
             blocked_only=blocked,

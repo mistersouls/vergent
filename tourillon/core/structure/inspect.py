@@ -68,6 +68,10 @@ class ProbeSummary:
 class NodeInspectResponse:
     """Full live snapshot returned by the target node in response to node.inspect.
 
+    Built entirely from the target's in-memory state (NodeState, Ring,
+    Partitioner, MemberRegistry, ProbeManager). No forwarding occurs;
+    tourctl connects directly to the target's peer address.
+
     partition_ranges contains one entry per owned vnode, sorted by start_pid.
     For the vnode with the minimum token (wrapping arc), start_pid may exceed
     end_pid; count still reflects the correct total for that vnode's arc.
@@ -76,12 +80,9 @@ class NodeInspectResponse:
     node_id, truncated to INSPECT_MEMBER_LIMIT when the registry is large.
     members_total always reflects the true registry size before truncation.
     probe_states contains entries from the target's ProbeManager sorted by
-    node_id, subject to the same limit.
-
-    forwarded_by is None when the contact node and the target node are the
-    same; otherwise it is the node_id of the node that proxied the request.
-    Both members_truncated and probe_states_truncated default to False and are
-    always present in the serialised payload.
+    node_id, subject to the same limit. Both members_truncated and
+    probe_states_truncated default to False and are always present in the
+    serialised payload.
     """
 
     node_id: str
@@ -102,24 +103,3 @@ class NodeInspectResponse:
     members_total: int
     probe_states: tuple[ProbeSummary, ...]
     probe_states_truncated: bool
-    forwarded_by: str | None
-
-
-@dataclass(frozen=True)
-class NodePeerViewResponse:
-    """Gossip record returned by the contact node for node.inspect.peer_view.
-
-    This response is constructed from the contact node's own MemberRegistry
-    and ProbeManager. It never involves the target node. phi is 0.0 when the
-    contact has never recorded a probe observation for the target.
-    """
-
-    target_node_id: str
-    observed_by: str
-    phase: str  # MemberPhase value
-    generation: int
-    seq: int
-    peer_address: str
-    tokens: tuple[int, ...]
-    probe_state: str  # MemberState value
-    phi: float

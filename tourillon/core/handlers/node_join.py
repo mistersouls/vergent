@@ -183,7 +183,11 @@ class NodeJoinHandler:
 
         # Respond to tourctl before launching background bootstrap.
         ok_payload = self._serializer.encode(
-            {"node_id": self._node_id, "phase": "joining"}
+            {
+                "node_id": self._node_id,
+                "phase": "joining",
+                "peer_address": self._peer_address,
+            }
         )
         ok_env = Envelope.create(
             ok_payload,

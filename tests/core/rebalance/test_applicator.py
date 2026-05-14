@@ -27,6 +27,8 @@ from tourillon.core.rebalance.plan import (
     RebalancePlan,
     TransferState,
 )
+from tourillon.core.structure.clock import HLCTimestamp
+from tourillon.core.structure.record import StoreKey, Version
 from tourillon.core.testing.mem_storage import InMemoryStorage
 
 
@@ -644,3 +646,558 @@ async def test_52_do_transfer_wrong_direction_marks_failed() -> None:
     h = applicator._handles.get(pid)
     assert h is not None
     assert h.state == TransferState.FAILED
+
+
+# ---------------------------------------------------------------------------
+# Crash recovery tests (proposal 005 scenarios 19, 20, 36, 37)
+# ---------------------------------------------------------------------------
+
+
+def _make_state(
+    epoch: int = 1,
+    staging_pids: tuple[int, ...] = (),
+    committed_pids: tuple[int, ...] = (),
+) -> NodeState:
+    return NodeState(
+        node_id="self",
+        phase=MemberPhase.JOINING,
+        generation=1,
+        seq=0,
+        tokens=(),
+        epoch=epoch,
+        committed_pids=committed_pids,
+        staging_pids=staging_pids,
+    )
+
+
+@pytest.mark.rebalance
+async def test_19_crash_recovery_same_epoch_staging_exists_sends_resume_from() -> None:
+    """exists() True; last_staged_index_key() → cursor C → resume_from=base64(C)
+    sent in rebalance.plan (JOIN); cleanup() not called."""
+    pid = 42
+    epoch = 4
+    storage = InMemoryStorage()
+    ser = _MockSerializer()
+
+    # Pre-populate staging with one record (simulates mid-transfer crash).
+    rec = Version(
+        address=StoreKey(b"ks", b"k1"),
+        metadata=HLCTimestamp(wall_ms=1000, counter=0, node_id="src"),
+        value=b"v",
+    )
+    store = storage.open_partition(pid)
+    staging = store.staging(epoch)
+    await staging.stage(rec)
+
+    # The applicator's _do_join_transfer always calls last_staged_index_key()
+    # and encodes it as resume_from in the outgoing rebalance.plan.
+    state_port = _MockStatePort()
+    state_port._state = _make_state(epoch=epoch, staging_pids=(pid,))
+
+    captured_plans: list[object] = []
+
+    class _CapturingPool:
+        async def acquire(self, node_id: str, addr: str) -> _FakeClient:
+            from tourillon.core.structure.envelope import Envelope
+
+            # Return a client whose stream captures the plan then delivers
+            # plan.ok → transfer (empty) → commit.ok.
+            plan_ok = Envelope(
+                kind="rebalance.plan.ok", payload=ser.encode({"epoch": epoch})
+            )
+            xfer = Envelope(
+                kind="rebalance.transfer",
+                payload=ser.encode(
+                    {
+                        "epoch": epoch,
+                        "pid": pid,
+                        "chunk_seq": 0,
+                        "is_last": True,
+                        "records": [],
+                    }
+                ),
+            )
+            commit_ok = Envelope(
+                kind="rebalance.commit.ok", payload=ser.encode({"epoch": epoch})
+            )
+
+            class _Cap(_FakeClient):
+                def stream(self, env: object) -> _FakeStreamIter:
+                    captured_plans.append(env)
+                    return _FakeStreamIter([plan_ok, xfer, commit_ok])
+
+            return _Cap([plan_ok, xfer, commit_ok])
+
+    applicator = RebalanceApplicator(
+        node_id="self",
+        pool=_CapturingPool(),  # type: ignore[arg-type]
+        state_port=state_port,  # type: ignore[arg-type]
+        storage=storage,  # type: ignore[arg-type]
+        serializer=ser,  # type: ignore[arg-type]
+        peer_addresses={"src": "src:7700"},
+    )
+
+    ranges = (
+        PartitionRangeTransfer(pid_start=pid, pid_end=pid, src="src", dst="self"),
+    )
+    plan = RebalancePlan(epoch=epoch, ranges=ranges)
+    await applicator.apply(plan)
+    await asyncio.sleep(0.2)
+
+    assert len(captured_plans) >= 1
+    import base64
+    import json
+
+    plan_data = json.loads(captured_plans[0].payload)  # type: ignore[union-attr]
+    assert plan_data["resume_from"] is not None
+    # Must be valid base64
+    base64.b64decode(plan_data["resume_from"])
+
+
+@pytest.mark.rebalance
+async def test_20_crash_recovery_same_epoch_no_staging_auto_heal() -> None:
+    """exists() False → treated as committed; pid moved to committed_pids; auto-healed."""
+    pid = 42
+    epoch = 4
+    storage = InMemoryStorage()
+    ser = _MockSerializer()
+    state_port = _MockStatePort()
+    state_port._state = _make_state(epoch=epoch, staging_pids=(pid,))
+
+    # No staging entries for pid → exists() returns False.
+    applicator = RebalanceApplicator(
+        node_id="self",
+        pool=_MockPool(),  # type: ignore[arg-type]
+        state_port=state_port,  # type: ignore[arg-type]
+        storage=storage,  # type: ignore[arg-type]
+        serializer=ser,  # type: ignore[arg-type]
+        peer_addresses={},
+    )
+
+    await applicator.crash_recover(
+        stored_epoch=epoch,
+        gossip_epoch=epoch,
+        staging_pids=(pid,),
+        committed_pids=(),
+    )
+
+    state = await state_port.load()
+    assert pid in state.committed_pids
+    assert pid not in state.staging_pids
+
+
+@pytest.mark.rebalance
+async def test_26_failed_node_source_exhausts_retries_marks_failed() -> None:
+    """FAILED node assigned as source → applicator retries; FAILED after max_retries.
+
+    The applicator treats a FAILED source identically to any unreachable peer:
+    retry with exponential backoff; FAILED after max_retries; no source
+    substitution performed (topology-only planner invariant).
+    """
+    pid = 10
+    storage = InMemoryStorage()
+    state_port = _MockStatePort()
+    pool = _MockPool()  # always raises ConnectionError (simulates FAILED node)
+    ser = _MockSerializer()
+
+    applicator = RebalanceApplicator(
+        node_id="self",
+        pool=pool,  # type: ignore[arg-type]
+        state_port=state_port,  # type: ignore[arg-type]
+        storage=storage,  # type: ignore[arg-type]
+        serializer=ser,  # type: ignore[arg-type]
+        peer_addresses={"failed-node": "failed-node:7700"},
+    )
+
+    import tourillon.core.rebalance.applicator as _app_mod
+
+    _orig_max = _app_mod._MAX_RETRIES
+    _orig_delay = _app_mod._BACKOFF_INITIAL
+    _app_mod._MAX_RETRIES = 2
+    _app_mod._BACKOFF_INITIAL = 0.01
+
+    try:
+        ranges = (
+            PartitionRangeTransfer(
+                pid_start=pid, pid_end=pid, src="failed-node", dst="self"
+            ),
+        )
+        plan = RebalancePlan(epoch=1, ranges=ranges)
+        await applicator.apply(plan)
+        await asyncio.sleep(0.4)
+    finally:
+        _app_mod._MAX_RETRIES = _orig_max
+        _app_mod._BACKOFF_INITIAL = _orig_delay
+
+    h = applicator._handles.get(pid)
+    assert h is not None
+    assert h.state == TransferState.FAILED
+
+
+@pytest.mark.rebalance
+async def test_28_destination_unreachable_succeeds_on_third_attempt() -> None:
+    """Destination refuses first 2 attempts, accepts 3rd → transfer completes; WARNING x2."""
+    pid = 88
+    ser = _MockSerializer()
+    from tourillon.core.structure.envelope import Envelope
+
+    plan_ok = Envelope(kind="rebalance.plan.ok", payload=ser.encode({"epoch": 1}))
+    xfer = Envelope(
+        kind="rebalance.transfer",
+        payload=ser.encode(
+            {"epoch": 1, "pid": pid, "chunk_seq": 0, "is_last": True, "records": []}
+        ),
+    )
+    commit_ok = Envelope(kind="rebalance.commit.ok", payload=ser.encode({"epoch": 1}))
+    good_client = _FakeClient([plan_ok, xfer, commit_ok])
+
+    calls = 0
+
+    class _FailTwicePool:
+        async def acquire(self, node_id: str, addr: str) -> _FakeClient:
+            nonlocal calls
+            calls += 1
+            if calls <= 2:
+                raise ConnectionError("connection refused")
+            return good_client
+
+    import tourillon.core.rebalance.applicator as _app_mod
+
+    _orig_delay = _app_mod._BACKOFF_INITIAL
+    _app_mod._BACKOFF_INITIAL = 0.01
+
+    storage = InMemoryStorage()
+    state_port = _MockStatePort()
+
+    try:
+        applicator = RebalanceApplicator(
+            node_id="self",
+            pool=_FailTwicePool(),  # type: ignore[arg-type]
+            state_port=state_port,  # type: ignore[arg-type]
+            storage=storage,  # type: ignore[arg-type]
+            serializer=ser,  # type: ignore[arg-type]
+            peer_addresses={"src": "src:7700"},
+        )
+        ranges = (
+            PartitionRangeTransfer(pid_start=pid, pid_end=pid, src="src", dst="self"),
+        )
+        plan = RebalancePlan(epoch=1, ranges=ranges)
+        await applicator.apply(plan)
+        await asyncio.sleep(0.5)
+    finally:
+        _app_mod._BACKOFF_INITIAL = _orig_delay
+
+    h = applicator._handles.get(pid)
+    assert h is not None
+    assert h.state == TransferState.COMMITTED
+    assert calls == 3
+
+
+@pytest.mark.rebalance
+async def test_30_cancel_event_aborts_retry_loop() -> None:
+    """cancel_event set between retry 1 and retry 2 → loop exits without consuming retry 2."""
+    pid = 30
+    ser = _MockSerializer()
+    storage = InMemoryStorage()
+    state_port = _MockStatePort()
+
+    calls = 0
+    cancel_after: asyncio.Event | None = None
+
+    class _FailAndSignalPool:
+        async def acquire(self, node_id: str, addr: str) -> object:
+            nonlocal calls
+            calls += 1
+            if calls == 1 and cancel_after is not None:
+                cancel_after.set()
+            raise ConnectionError("refused")
+
+    import tourillon.core.rebalance.applicator as _app_mod
+
+    _orig_delay = _app_mod._BACKOFF_INITIAL
+    _app_mod._BACKOFF_INITIAL = 0.05
+
+    try:
+        applicator = RebalanceApplicator(
+            node_id="self",
+            pool=_FailAndSignalPool(),  # type: ignore[arg-type]
+            state_port=state_port,  # type: ignore[arg-type]
+            storage=storage,  # type: ignore[arg-type]
+            serializer=ser,  # type: ignore[arg-type]
+            peer_addresses={"src": "src:7700"},
+        )
+        ranges = (
+            PartitionRangeTransfer(pid_start=pid, pid_end=pid, src="src", dst="self"),
+        )
+        plan = RebalancePlan(epoch=1, ranges=ranges)
+        await applicator.apply(plan)
+        h = applicator._handles[pid]
+        cancel_after = h.cancel_event
+        await asyncio.sleep(0.3)
+    finally:
+        _app_mod._BACKOFF_INITIAL = _orig_delay
+
+    # After cancel_event is set, the loop must abort.  acquire() should have
+    # been called at most twice (first attempt + optionally one retry).
+    assert calls <= 2
+    h = applicator._handles.get(pid)
+    assert h is not None
+    assert h.state in (TransferState.CANCELLED, TransferState.FAILED)
+
+
+@pytest.mark.rebalance
+async def test_36_crash_recovery_epoch_drift_cleanup_and_restart() -> None:
+    """stored_epoch < gossip_epoch → staging(stored_epoch) cleaned up for all staging_pids.
+
+    After cleanup state.toml is rewritten with epoch=gossip_epoch,
+    staging_pids=[]; transfer restarts fresh under the new epoch.
+    """
+    pid = 42
+    stored_epoch = 4
+    gossip_epoch = 5
+    storage = InMemoryStorage()
+    ser = _MockSerializer()
+    state_port = _MockStatePort()
+    state_port._state = _make_state(epoch=stored_epoch, staging_pids=(pid,))
+
+    # Pre-populate stale staging entries for old epoch.
+    rec = Version(
+        address=StoreKey(b"ks", b"k1"),
+        metadata=HLCTimestamp(wall_ms=1000, counter=0, node_id="src"),
+        value=b"v",
+    )
+    old_staging = storage.open_partition(pid).staging(stored_epoch)
+    await old_staging.stage(rec)
+    assert await old_staging.exists()
+
+    applicator = RebalanceApplicator(
+        node_id="self",
+        pool=_MockPool(),  # type: ignore[arg-type]
+        state_port=state_port,  # type: ignore[arg-type]
+        storage=storage,  # type: ignore[arg-type]
+        serializer=ser,  # type: ignore[arg-type]
+        peer_addresses={},
+    )
+
+    await applicator.crash_recover(
+        stored_epoch=stored_epoch,
+        gossip_epoch=gossip_epoch,
+        staging_pids=(pid,),
+        committed_pids=(),
+    )
+
+    # Stale staging entries deleted.
+    assert not await old_staging.exists()
+
+    # state.toml updated: epoch advanced, staging_pids cleared.
+    state = await state_port.load()
+    assert state.epoch == gossip_epoch
+    assert state.staging_pids == ()
+
+
+@pytest.mark.rebalance
+async def test_37_crash_recovery_no_rebalance_needed_empty_plan() -> None:
+    """planner.plan returns empty plan → no transfers started; staging cleaned up.
+
+    If the new plan has no ranges (the topology re-stabilised), apply() with
+    an empty plan results in no handles. Any residual staging entries from the
+    prior epoch were cleaned by crash_recover(); the node then proceeds to its
+    target phase (JOINING → READY).
+    """
+    epoch = 5
+    storage = InMemoryStorage()
+    ser = _MockSerializer()
+    state_port = _MockStatePort()
+    state_port._state = _make_state(epoch=epoch)
+
+    # Simulate a prior epoch's cleanup: no staging entries remain.
+    # crash_recover() already cleared them; now apply() is called with empty plan.
+    applicator = RebalanceApplicator(
+        node_id="self",
+        pool=_MockPool(),  # type: ignore[arg-type]
+        state_port=state_port,  # type: ignore[arg-type]
+        storage=storage,  # type: ignore[arg-type]
+        serializer=ser,  # type: ignore[arg-type]
+        peer_addresses={},
+    )
+
+    empty_plan = RebalancePlan(epoch=epoch, ranges=())
+    await applicator.apply(empty_plan)
+    await asyncio.sleep(0.05)
+
+    # No handles → no transfers started.
+    assert applicator._handles == {}
+
+    status = await applicator.status()
+    assert status["active_partitions"] == 0
+    # No FAILED transfers → node can proceed to READY.
+    assert status["blocked"] is False
+
+
+@pytest.mark.rebalance
+async def test_41_inactive_partitions_count() -> None:
+    """Node owns 131072 partitions; 50 have TransferHandle → active=50; inactive=131022."""
+    storage = InMemoryStorage()
+    state_port = _MockStatePort()
+    pool = _MockPool()
+    ser = _MockSerializer()
+
+    applicator = RebalanceApplicator(
+        node_id="self",
+        pool=pool,  # type: ignore[arg-type]
+        state_port=state_port,  # type: ignore[arg-type]
+        storage=storage,  # type: ignore[arg-type]
+        serializer=ser,  # type: ignore[arg-type]
+        peer_addresses={},
+        total_partitions=131072,
+    )
+
+    from tourillon.core.rebalance.plan import PartitionTransfer, TransferHandle
+
+    applicator._handles = {
+        i: TransferHandle(
+            transfer=PartitionTransfer(pid=i, src="src", dst="self"),
+            state=TransferState.PENDING,
+        )
+        for i in range(50)
+    }
+
+    status = await applicator.status()
+    assert status["active_partitions"] == 50
+    assert status["inactive_partitions"] == 131022
+    assert status["active_partitions"] + status["inactive_partitions"] == 131072
+
+
+# ---------------------------------------------------------------------------
+# Edge-case coverage: state=None guards, wait_for_completion direct call
+# ---------------------------------------------------------------------------
+
+
+class _NoneStatePort:
+    """StatePort that always returns None from load()."""
+
+    async def load(self) -> None:
+        return None
+
+    async def save(self, state: object) -> None:
+        pass
+
+
+@pytest.mark.rebalance
+async def test_crash_recover_state_none_is_noop() -> None:
+    """crash_recover returns immediately when state_port.load() returns None."""
+    storage = InMemoryStorage()
+    state_port = _NoneStatePort()
+    pool = _MockPool()
+    ser = _MockSerializer()
+
+    applicator = RebalanceApplicator(
+        node_id="self",
+        pool=pool,  # type: ignore[arg-type]
+        state_port=state_port,  # type: ignore[arg-type]
+        storage=storage,  # type: ignore[arg-type]
+        serializer=ser,  # type: ignore[arg-type]
+        peer_addresses={},
+    )
+
+    # Should not raise and should do nothing.
+    await applicator.crash_recover(
+        stored_epoch=1,
+        gossip_epoch=2,
+        staging_pids=(42,),
+        committed_pids=(),
+    )
+
+    # No handles were created.
+    assert applicator._handles == {}
+
+
+@pytest.mark.rebalance
+async def test_recover_same_epoch_no_auto_heal_when_all_staging_present() -> None:
+    """_recover_same_epoch is a no-op when all staging pids still have LMDB entries."""
+    storage = InMemoryStorage()
+    state_port = _MockStatePort()
+    pool = _MockPool()
+    ser = _MockSerializer()
+
+    applicator = RebalanceApplicator(
+        node_id="self",
+        pool=pool,  # type: ignore[arg-type]
+        state_port=state_port,  # type: ignore[arg-type]
+        storage=storage,  # type: ignore[arg-type]
+        serializer=ser,  # type: ignore[arg-type]
+        peer_addresses={},
+    )
+
+    # Seed staging entries so exists() returns True.
+    pid = 77
+    from tourillon.core.structure.clock import HLCTimestamp
+    from tourillon.core.structure.record import StoreKey
+    from tourillon.core.structure.record import Version as _Version
+
+    rec = _Version(
+        address=StoreKey(keyspace=b"ks", key=b"k"),
+        metadata=HLCTimestamp(wall_ms=1, counter=0, node_id="src"),
+        value=b"v",
+    )
+    staging = storage.open_partition(pid).staging(epoch=1)
+    await staging.stage(rec)
+
+    # stored_epoch == gossip_epoch → same-epoch path; pid has staging entries → no auto-heal.
+    await applicator.crash_recover(
+        stored_epoch=1,
+        gossip_epoch=1,
+        staging_pids=(pid,),
+        committed_pids=(),
+    )
+
+    # State should be unchanged (no save happened via the auto-heal path).
+    loaded = await state_port.load()
+    assert pid not in loaded.committed_pids
+
+
+@pytest.mark.rebalance
+async def test_wait_for_completion_returns_success_and_failed_lists() -> None:
+    """wait_for_completion() returns (success_pids, failed_pids) after all transfers settle."""
+    storage = InMemoryStorage()
+    state_port = _MockStatePort()
+    pool = _MockPool()
+    ser = _MockSerializer()
+
+    applicator = RebalanceApplicator(
+        node_id="self",
+        pool=pool,  # type: ignore[arg-type]
+        state_port=state_port,  # type: ignore[arg-type]
+        storage=storage,  # type: ignore[arg-type]
+        serializer=ser,  # type: ignore[arg-type]
+        peer_addresses={},
+    )
+
+    # An empty plan → WaitGroup counter is zero → wait returns immediately.
+    empty_plan = RebalancePlan(epoch=1, ranges=())
+    await applicator.apply(empty_plan)
+
+    success, failed = await applicator.wait_for_completion()
+    assert success == []
+    assert failed == []
+
+
+@pytest.mark.rebalance
+async def test_update_state_committed_state_none_is_noop() -> None:
+    """_update_state_committed is a no-op when state_port.load() returns None."""
+    storage = InMemoryStorage()
+    state_port = _NoneStatePort()
+    pool = _MockPool()
+    ser = _MockSerializer()
+
+    applicator = RebalanceApplicator(
+        node_id="self",
+        pool=pool,  # type: ignore[arg-type]
+        state_port=state_port,  # type: ignore[arg-type]
+        storage=storage,  # type: ignore[arg-type]
+        serializer=ser,  # type: ignore[arg-type]
+        peer_addresses={},
+    )
+
+    # Should not raise.
+    await applicator._update_state_committed(42)

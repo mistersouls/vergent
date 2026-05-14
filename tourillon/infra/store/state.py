@@ -17,6 +17,18 @@ Writes are atomic: new content is written to a sibling temp file,
 os.replace() is called, then the containing directory is fsynced when the
 platform supports it. A crash mid-write leaves either the old state or the
 new state visible on disk; a partial file is never possible.
+
+All load() and save() calls are serialised through a per-instance asyncio
+Lock (_io_lock).  On Windows, Python's open() does not request the
+FILE_SHARE_DELETE sharing flag, which prevents os.replace() from renaming
+over a file that is currently open for reading by another thread pool
+worker.  The _io_lock ensures that no read thread is holding state.toml
+open while a save thread executes os.replace(state.tmp, state.toml).
+
+Callers that need an atomic load-modify-save cycle must additionally hold
+their own higher-level lock (e.g. RebalanceApplicator._state_lock) to
+prevent interleaved modifications between the load and the save; that
+higher-level lock is orthogonal to the I/O-serialisation role of _io_lock.
 """
 
 from __future__ import annotations
@@ -55,12 +67,19 @@ class FileStateAdapter:
 
     Injected at startup by the bootstrap sequence. No other component may
     open or write state.toml directly.
+
+    All I/O is serialised through _io_lock to prevent Windows
+    FILE_SHARE_DELETE races between concurrent thread-pool read operations
+    and the os.replace() rename inside save().
     """
 
     def __init__(self, path: Path) -> None:
         """Initialise with the absolute path to state.toml."""
         self._path = path
         self._tmp = path.with_suffix(_TMP_SUFFIX)
+        # Serialises all I/O: prevents concurrent reads from holding state.toml
+        # open (without FILE_SHARE_DELETE) while save() renames state.tmp over it.
+        self._io_lock = asyncio.Lock()
 
     async def load(self) -> NodeState | None:
         """Read and parse state.toml.
@@ -68,14 +87,16 @@ class FileStateAdapter:
         Return None if the file does not exist. Raise StateError on any
         parse or I/O failure.
         """
-        return await asyncio.to_thread(self._load_sync)
+        async with self._io_lock:
+            return await asyncio.to_thread(self._load_sync)
 
     async def save(self, state: NodeState) -> None:
         """Write state atomically via temp-file + os.replace() + fsync.
 
         Raise StateError on any I/O failure.
         """
-        await asyncio.to_thread(self._save_sync, state)
+        async with self._io_lock:
+            await asyncio.to_thread(self._save_sync, state)
         logger.info(
             "State persisted to disk (phase: %s, epoch: %d, generation: %d).",
             state.phase.value,
