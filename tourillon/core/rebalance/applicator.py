@@ -279,41 +279,11 @@ class RebalanceApplicator:
         trigger = self._infer_trigger()
         role = "receiving" if trigger == "joining" else "sending"
 
-        summary: dict[str, int] = {
-            "committed": 0,
-            "running": 0,
-            "pending": 0,
-            "failed": 0,
-            "cancelled": 0,
-        }
-        blocked = False
-        empty_committed = 0
-
-        for h in self._handles.values():
-            if h.state == TransferState.COMMITTED and h.bytes_done == 0:
-                empty_committed += 1
-                continue
-            key = h.state.value
-            if key in summary:
-                summary[key] += 1
-            if h.state == TransferState.FAILED:
-                blocked = True
-
+        summary, blocked, empty_committed = self._scan_handle_summary()
         active_partitions = len(self._handles) - empty_committed
-        total_owned = self._total_owned()
-        inactive_partitions = max(0, total_owned - active_partitions)
+        inactive_partitions = max(0, self._total_owned() - active_partitions)
 
-        active_pids = [
-            pid
-            for pid, h in self._handles.items()
-            if not (h.state == TransferState.COMMITTED and h.bytes_done == 0)
-        ]
-        page = [pid for pid in sorted(active_pids) if pid > after_pid][:limit]
-        has_more = len(page) == limit and (
-            max(page) < max(active_pids) if page and active_pids else False
-        )
-        next_pid: int | None = page[-1] if has_more else None
-
+        page, has_more, next_pid = self._build_transfer_page(after_pid, limit)
         transfers = [self._handle_to_dict(self._handles[pid]) for pid in page]
 
         return {
@@ -328,6 +298,62 @@ class RebalanceApplicator:
             "next_pid": next_pid,
             "transfers": transfers,
         }
+
+    def _scan_handle_summary(self) -> tuple[dict[str, int], bool, int]:
+        """Scan all handles and return (summary_counts, blocked, empty_committed).
+
+        A handle is *inactive* (empty_committed) when it is COMMITTED with
+        bytes_done == 0.  Inactive handles are counted separately and excluded
+        from the summary table.  The blocked flag is True when any handle is in
+        the FAILED terminal state.
+        """
+        summary: dict[str, int] = {
+            "committed": 0,
+            "running": 0,
+            "pending": 0,
+            "failed": 0,
+            "cancelled": 0,
+        }
+        blocked = False
+        empty_committed = 0
+        for h in self._handles.values():
+            if h.state == TransferState.COMMITTED and h.bytes_done == 0:
+                empty_committed += 1
+                continue
+            key = h.state.value
+            if key in summary:
+                summary[key] += 1
+            if h.state == TransferState.FAILED:
+                blocked = True
+        return summary, blocked, empty_committed
+
+    def _build_transfer_page(
+        self,
+        after_pid: int,
+        limit: int,
+    ) -> tuple[list[int], bool, int | None]:
+        """Return (page, has_more, next_pid) for the active-pid cursor window.
+
+        Active pids are those whose handle is not an empty COMMITTED entry.
+        The page is sorted ascending and starts after after_pid (exclusive).
+        has_more is True when the page is full and at least one active pid
+        remains beyond it; next_pid is the last pid in the page when has_more
+        is True, otherwise None.
+        """
+        active = sorted(self._active_pids())
+        page = [pid for pid in active if pid > after_pid][:limit]
+        max_active = active[-1] if active else -1
+        has_more = len(page) == limit and bool(page) and page[-1] < max_active
+        next_pid: int | None = page[-1] if has_more else None
+        return page, has_more, next_pid
+
+    def _active_pids(self) -> list[int]:
+        """Return pids whose handle is not an empty COMMITTED entry."""
+        return [
+            pid
+            for pid, h in self._handles.items()
+            if not (h.state == TransferState.COMMITTED and h.bytes_done == 0)
+        ]
 
     async def _run_transfer(self, handle: TransferHandle) -> None:
         """Run one pid transfer with retry/backoff."""
@@ -460,22 +486,9 @@ class RebalanceApplicator:
             if resp.kind == "rebalance.transfer":
                 data = self._serializer.decode(resp.payload)
                 await self._stage_chunk(handle, staging, data, records)
-                if data.get("is_last") and not is_last_seen:
-                    is_last_seen = True
-                    digest = compute_transfer_digest(iter(records))
-                    commit_env = Envelope(
-                        kind="rebalance.commit",
-                        payload=self._serializer.encode(
-                            {
-                                "epoch": epoch,
-                                "pid": pid,
-                                "digest": digest,
-                            }
-                        ),
-                        correlation_id=plan_env.correlation_id,
-                        schema_id=self._serializer.schema_id,
-                    )
-                    await client.send(commit_env)
+                is_last_seen = await self._send_commit_if_last(
+                    data, records, is_last_seen, epoch, pid, plan_env, client
+                )
                 continue
             if resp.kind == "rebalance.commit.ok":
                 break
@@ -485,6 +498,35 @@ class RebalanceApplicator:
 
         await staging.commit()
         await self._update_state_committed(pid)
+
+    async def _send_commit_if_last(
+        self,
+        data: dict[str, Any],
+        records: list[Any],
+        is_last_seen: bool,
+        epoch: int,
+        pid: int,
+        plan_env: Envelope,
+        client: Any,  # noqa: ANN401 — opaque TcpClient/mock, no shared Protocol yet
+    ) -> bool:
+        """Send rebalance.commit when data['is_last'] is True and not yet sent.
+
+        Return the updated is_last_seen flag so the caller can suppress any
+        duplicate is_last chunks that may arrive on a resumed stream.
+        """
+        if not data.get("is_last") or is_last_seen:
+            return is_last_seen
+        digest = compute_transfer_digest(iter(records))
+        commit_env = Envelope(
+            kind="rebalance.commit",
+            payload=self._serializer.encode(
+                {"epoch": epoch, "pid": pid, "digest": digest}
+            ),
+            correlation_id=plan_env.correlation_id,
+            schema_id=self._serializer.schema_id,
+        )
+        await client.send(commit_env)
+        return True
 
     async def _do_drain_transfer(self, handle: TransferHandle) -> None:
         """Execute the source-side (DRAIN) transfer protocol.

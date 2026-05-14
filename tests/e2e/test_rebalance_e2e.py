@@ -821,16 +821,41 @@ async def test_e2e_rebalance_status_transfer_entries_have_src_and_dst(
 @pytest.mark.e2e
 @pytest.mark.rebalance
 def test_e2e_tourctl_rebalance_status_help() -> None:
-    """tourctl rebalance status --help exits 0 and mentions --after-pid."""
+    """tourctl rebalance status --help exits 0 and --after-pid is a valid option.
+
+    Validates --after-pid existence via a type-mismatch probe instead of
+    asserting on help text, which is subject to Typer/Rich rendering
+    differences across terminal widths, platforms, and library versions.
+    Passing a non-integer value for --after-pid produces Click's invariant
+    error message "invalid value for '--after-pid'" when the option is
+    recognised, and "no such option" when it is not.  Neither form depends
+    on terminal width or ANSI colour support.
+    """
+    import re
+
     from typer.testing import CliRunner
 
     from tourctl.bootstrap.main import app as tourctl_app
 
     runner = CliRunner()
-    result = runner.invoke(tourctl_app, ["rebalance", "status", "--help"])
-    assert result.exit_code == 0
-    output_lower = result.output.lower()
-    assert "after-pid" in output_lower or "after_pid" in output_lower
+
+    # 1. --help must exit 0.
+    help_result = runner.invoke(tourctl_app, ["rebalance", "status", "--help"])
+    assert help_result.exit_code == 0
+
+    # 2. Passing a non-integer value for --after-pid must produce a type-mismatch
+    #    error (not "no such option"), proving the option is registered.
+    probe = runner.invoke(
+        tourctl_app,
+        ["rebalance", "status", "--after-pid", "not-an-int", "127.0.0.1:0"],
+    )
+    stripped = re.sub(r"\x1b\[[0-9;]*m", "", probe.output).lower()
+    assert (
+        "no such option" not in stripped
+    ), "--after-pid is not registered; Typer/Click said 'no such option'"
+    assert (
+        "after-pid" in stripped or "after_pid" in stripped
+    ), f"Expected type-mismatch message for --after-pid, got: {stripped!r}"
 
 
 # ---------------------------------------------------------------------------

@@ -47,13 +47,11 @@ def rebalance_status(
     ],
     after_pid: Annotated[
         int,
-        typer.Option(
-            "--after-pid", help="Paginate from this pid (exclusive lower bound)"
-        ),
+        typer.Option(help="Paginate from this pid (exclusive lower bound)"),
     ] = 0,
     limit: Annotated[
         int,
-        typer.Option("--limit", help="Max transfer entries per page"),
+        typer.Option(help="Max transfer entries per page"),
     ] = 500,
     blocked: Annotated[
         bool,
@@ -65,7 +63,7 @@ def rebalance_status(
     ] = False,
     timeout: Annotated[
         float,
-        typer.Option("--timeout", help="Response timeout in seconds"),
+        typer.Option(help="Response timeout in seconds"),
     ] = RESPONSE_TIMEOUT,
     contexts_path: Annotated[Path, typer.Option("--contexts")] = _DEFAULT_CONTEXTS_PATH,
 ) -> None:

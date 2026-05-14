@@ -104,6 +104,16 @@ followed by a blank line, then the module docstring:
 - No wildcard imports (`from x import *`). No unused imports or variables.
 - No decorative separator comments (`# ----`, `# ====`).
 - Max cyclomatic complexity: **8** (Ruff `mccabe` C90 rule, `max-complexity = 8` in `pyproject.toml`). Refactor into smaller helpers rather than raising complexity above 8.
+  CI also enforces a hard ceiling of **10** via `radon`. Any block with radon CC > 10 fails the build. The check command is:
+  ```bash
+  uv run radon cc tourillon -n C --total-average -s && \
+  uv run radon cc tourillon -n C -s --json | \
+    python -c "import sys, json; data=json.load(sys.stdin); \
+      blocks=[b for f in data.values() for b in f if b['complexity']>10]; \
+      [print(f\"FAIL {b['name']} complexity={b['complexity']}\") for b in blocks]; \
+      sys.exit(1 if blocks else 0)"
+  ```
+  Write to the **8** Ruff target; treat radon > 10 as the absolute CI gate.
 - **Prefer `logging` over any print-like output** for all operational and progress messages. Use `logger.info`, `logger.debug`, `logger.warning`, `logger.error`. Never use `print()`.
   - **`tourillon` (daemon):** zero `print()` and zero `Console.print()` — every output line goes through `logging`. The process calls `setup_logging()` at startup (`tourillon/bootstrap/log.py`) before any other code runs.
   - **`tourctl` (operator CLI):** Rich `Console.print()` is permitted for explicit user-facing terminal output in Typer commands. Internal helpers still use `logging`.
@@ -265,6 +275,22 @@ uv run pytest -m kv
 - Each proposal's "Test scenarios" table is the authoritative source for what
   must be tested.
 
+### Portability — tests must pass everywhere, not just locally
+
+Tests must produce identical results on Linux (Ubuntu, CI) and Windows
+(developer machines), across terminal widths, and on any Python 3.14 patch
+release. Violating this rule is a blocking defect.
+
+| Category | Rule |
+|----------|------|
+| **Terminal / Rich output** | Never assert on Rich-rendered strings that depend on terminal width or colour support. Strip ANSI codes before asserting (`re.sub(r'\x1b\[[0-9;]*m', '', text)`), or invoke the CLI with `color=False` / `no_color=True`. |
+| **Typer `--help` content** | Never assert on `--help` output to verify that an option exists or appears. On some platform/terminal-width/Typer-version combinations, Typer/Rich silently omits options from the rendered help even when they are fully functional. Instead, use a **behavioural probe**: invoke the command with an intentionally invalid value for the option (e.g. a non-integer for an `int` option) and assert that Click's type-mismatch error message contains the option name — proving it is registered — rather than `"no such option"`. Strip ANSI codes before asserting (`re.sub(r'\x1b\[[0-9;]*m', '', text)`). Do **not** pass an explicit option name string to `typer.Option()` when it exactly matches what Typer would derive from the parameter name (`after_pid` → `--after-pid`); the redundant explicit name causes rendering discrepancies across Typer versions and terminal widths. |
+| **File paths** | Use `pathlib.Path` and `os.sep`; never hardcode `/` or `\` separators in assertions. |
+| **Timing / ordering** | Never rely on `dict` insertion order in assertions unless it is a `collections.OrderedDict` or an explicitly sorted structure. Never `time.sleep()` to stabilise a race; use `asyncio.Event` or polling with `asyncio.timeout()`. |
+| **Ports / addresses** | Never hardcode port numbers; always use OS-assigned emphemeral ports via fixtures (bind to port `0`). |
+| **Environment variables** | Reset or scope any env-var mutations inside the test; use `monkeypatch.setenv` / `monkeypatch.delenv`. |
+| **Temp directories** | Use `tmp_path` (pytest fixture) rather than hardcoded or `/tmp/`-relative paths. |
+
 ---
 
 ## Documentation rules
@@ -283,7 +309,7 @@ uv run pytest -m kv
   `asyncio.run()`.
 - `time.sleep()` — use `await asyncio.sleep()`.
 - `print()` or `Console.print()` anywhere in `tourillon/` — the daemon emits zero terminal output outside of `logging`. Use `logger.info/debug/warning/error`. `tourctl/` may use `Console.print()` in Typer commands only.
-- Exceed cyclomatic complexity **8** — refactor into helpers instead.
+- Exceed cyclomatic complexity **8** (Ruff target) or **10** (radon CI gate) — refactor into helpers instead.
 - Hardcode IP addresses, ports, or certificate paths.
 - Bypass type annotations with `Any` unless truly unavoidable; if required, add
   `# noqa: ANN401` with a comment explaining why.
