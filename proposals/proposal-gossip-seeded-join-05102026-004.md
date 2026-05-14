@@ -4,7 +4,7 @@
 **Status:** Accepted — Completed by proposal 005
 **Date:** 2026-05-10
 **Sequence:** 004
-**Revision:** 2
+**Revision:** 3
 
 ---
 
@@ -130,9 +130,17 @@ $ tourillon node start --config config.toml   # phase=ready
 2026-05-10T14:22:00 INFO     [tourillon.core.lifecycle.bootstrap] Topology rebuilt for node 'node-2': 4 vnode(s), epoch 3.
 2026-05-10T14:22:00 INFO     [tourillon.core.transport.server] Peer server listening on 0.0.0.0:7701.
 2026-05-10T14:22:00 INFO     [tourillon.core.transport.server] KV server listening on 0.0.0.0:7700.
+2026-05-10T14:22:01 INFO     [tourillon.core.gossip.engine] Gossip bootstrap complete. seeds_ok=2 seeds_err=0
 2026-05-10T14:22:01 INFO     [tourillon.core.gossip.engine] GossipEngine started.
 2026-05-10T14:22:01 INFO     [tourillon.infra.cli.node] Node 'node-2' is ready (epoch 3, generation 1).
 ```
+
+The unconditional gossip bootstrap also runs on `READY` restart when
+`config.seeds` is non-empty: only `NodeState` is persisted across restarts,
+so the full membership registry must be re-fetched from at least one seed.
+A node configured **without** seeds (typically the first node bootstrapped
+via `IDLE → READY`) skips this step and relies on the symmetric AE protocol
+(`gossip.delta.wanted`) to rediscover its peers as they ping it.
 
 #### DRAINING restart — gossip bootstrap + KV server
 
@@ -645,14 +653,24 @@ randomly selected peer. Uses the SHA-256 fingerprint and current `epoch` as a
 cheap divergence check before any version-vector exchange. In steady state the
 response has `same = true` and the total cost is a few dozen bytes.
 
+**Symmetric exchange.** When divergence is detected, the digest/delta round
+trip is symmetric: the responder both pushes the records it has fresher
+(`members`) **and** advertises the `node_id`s it is missing relative to the
+initiator's version vector (`wanted`, see `gossip.delta` schema below).
+The initiator answers with a final `gossip.push` carrying the wanted records.
+Both sides therefore converge in a single AE cycle from any starting state,
+including a peer whose registry has been reduced to itself on a cold restart.
+See `gossip.delta` for the full sequence and rationale.
+
 #### Bootstrap path — full-resync on startup
 
-When phase is `JOINING` or `DRAINING` at startup, the node sends an empty
-`gossip.digest` (`members: []`) to every seed in `config.toml`. This triggers
-a full delta download from each responding seed. The local registry is then the
-union of all received deltas, merged via `supersedes()`. Retried with
-exponential backoff until at least one seed responds or `max_retries` is
-exhausted (see Gossip bootstrap backoff and retry).
+When phase is `READY`, `JOINING`, or `DRAINING` at startup **and**
+`config.seeds` is non-empty, the node sends an empty `gossip.digest`
+(`members: []`) to every seed. This triggers a full delta download from
+each responding seed. The local registry is then the union of all received
+deltas, merged via `supersedes()`. Retried with exponential backoff until
+at least one seed responds or `max_retries` is exhausted (see Gossip
+bootstrap backoff and retry).
 
 Bootstrap connections are direct `TcpClient` instances opened outside
 `PeerClientPool` — the node does not yet know the seeds' `node_id`s, and the
@@ -723,7 +741,7 @@ The gossip domain uses **7 kinds** (3 initiator request kinds + 3 response kinds
 | `gossip.ping` | A → 1 peer | `request()` | one `gossip.pong` or `gossip.error` | Divergence quick-check: epoch + fingerprint + member_count |
 | `gossip.pong` | B → A | _(response)_ | — | `same: true` → done; `same: false` → open digest/delta |
 | `gossip.digest` | A → B | `stream()` | last `gossip.delta` with `has_more: false` or `gossip.error` | One page of the version vector (empty list for bootstrap) |
-| `gossip.delta` | B → A | _(stream item)_ | `has_more: false` | Full `Member` records where B is ahead; streamed on the same `correlation_id` |
+| `gossip.delta` | B → A | _(stream item)_ | `has_more: false` | Full `Member` records where B is ahead **and** sorted list of `node_id`s B is missing (`wanted`); streamed on the same `correlation_id` |
 | `gossip.error` | B → A | _(common response)_ | — | Application-level error for any gossip kind; carries rejected kind, code, and message; always closes the connection |
 
 #### `gossip.push`
@@ -821,9 +839,43 @@ An empty `members` list (`[]`) is valid and used exclusively during bootstrap.
       "tokens":          [2048, 6144],
       "partition_shift": 12
     }
-  ]
+  ],
+  "wanted": ["node-7", "node-12"]
 }
 ```
+
+`wanted` carries the sorted list of `node_id`s that appeared in the
+initiator's `gossip.digest` version vector but are **absent** from the
+responder's local registry. The list is empty in the common steady-state
+case where both peers know the same set of nodes. The field is mandatory
+on the wire (use `[]` when empty) so the initiator can rely on its presence
+without a defensive `data.get("wanted", [])` guard.
+
+After merging every delta page of the AE cycle, the initiator aggregates
+the `wanted` lists, collects the matching local `Member` records, and sends
+them back to the responder in a single `gossip.push` envelope with `ttl=1`
+on the same connection. This closes the convergence loop symmetrically:
+
+```
+A (initiator)              B (responder)
+   ── gossip.digest(A_vv) ─►
+                              B computes:
+                                ahead  = members local where A lags
+                                wanted = node_ids in A_vv unknown locally
+   ◄── gossip.delta(ahead, wanted)
+   merge: A learns from B
+   ── gossip.push(members B wanted, ttl=1) ──►
+                              merge: B learns from A
+```
+
+Without `wanted`, the AE protocol carries information from responder to
+initiator only. A peer that loses its registry on a cold restart and has
+no seeds configured (typically the first node bootstrapped via
+`IDLE → READY`) is then unable to ever rediscover the cluster on its own,
+because its own AE loop has no eligible peers and no inbound message
+teaches it about other nodes. The `wanted` round closes that gap with one
+extra envelope per divergent cycle and **zero** extra traffic when peers
+are already in sync (the `same=True` ping/pong fast path is unchanged).
 
 #### `gossip.error`
 
@@ -1486,6 +1538,11 @@ All scenarios run with in-memory adapters (fake `TcpClient`, fake
 | 43 | node-2 (`pshift=10`) receives `gossip.error code: partition_shift_mismatch` in response to its own `gossip.push` | node-2 hot-path response handler | node-2 applies write-before-announce → `announce(failed_member)` → `stop()` (hot_queue drained); peers receive FAILED push for node-2 |
 | 44 | Joining node (`pshift=10`) bootstraps against seed whose delta contains members with `pshift=12` | `GossipBootstrapper.run()` | `BootstrapPartitionShiftError` raised immediately; no registry write; no retry; ERROR logged with both pshift values; daemon exits 1 |
 | 45 | Joining node (`pshift=12`) bootstraps against seed whose delta contains members with `pshift=12` | `GossipBootstrapper.run()` | No mismatch; delta applied normally; `seeds_ok=1`; bootstrap succeeds |
+| 46 | `GossipDigestHandler` receives a digest mentioning `node_id`s absent from the local registry | Symmetric AE | Response `gossip.delta` carries `wanted` populated with the sorted list of those `node_id`s; `members` contains records the peer is missing if any |
+| 47 | `GossipDigestHandler` receives a digest where every entry matches the local registry | Symmetric AE | Response `gossip.delta` carries `wanted: []`; only freshness-based `members` (possibly empty) are returned |
+| 48 | AE initiator receives a `gossip.delta` with non-empty `wanted` | `_ae_digest_delta` aggregates `wanted` across pages | Initiator sends one `gossip.push` (`ttl=1`) containing every local `Member` whose `node_id` appears in the aggregated `wanted` set; the responder merges and converges in the same cycle |
+| 49 | AE initiator receives a `gossip.delta` with `wanted: []` | Steady-state divergence (one stale seq) | No follow-up `gossip.push` is sent; total AE traffic matches the pre-`wanted` cost |
+| 50 `[e2e]` | First node (no seeds) restarts cold and persists only its own `NodeState`; a second node continues running and AE-pings it | One AE cycle elapses | First node receives ping → digest → answers `wanted=[node-2,…]` → second node pushes back the missing records → first node's registry converges; subsequent AE cycles report `same=true` |
 
 ---
 
@@ -1515,6 +1572,9 @@ All scenarios run with in-memory adapters (fake `TcpClient`, fake
 - [ ] `Member.partition_shift` is present in every gossiped record (`gossip.push`, `gossip.delta`); any record missing this field is rejected as `invalid_member`.
 - [ ] On `partition_shift` mismatch: a node acting as **responder** to `gossip.push` sends `gossip.error code: partition_shift_mismatch` and does NOT transition to FAILED; a node acting as **initiator** that detects mismatch in `gossip.delta` closes and logs WARNING without transitioning to FAILED; only the node that **receives** `gossip.error code: partition_shift_mismatch` in response to its own emitted data transitions to FAILED via write-before-announce → announce → stop.
 - [ ] During **gossip bootstrap**, `partition_shift` is checked on each delta member before `merge_registry`; a mismatch raises `BootstrapPartitionShiftError` immediately (no retry, no registry write); ERROR is logged with both values; daemon exits 1 via the clean shutdown sequence.
+- [ ] `gossip.delta` always carries the `wanted` field (possibly empty). The responder populates it with the sorted list of `node_id`s present in the initiator's digest but absent from the local registry. The initiator aggregates `wanted` across delta pages and emits a single `gossip.push` (`ttl=1`) on the same connection carrying every local `Member` whose `node_id` appears in the aggregate set. No follow-up push is sent when `wanted` is empty.
+- [ ] Symmetric AE converges a peer that lost its full registry on cold restart (e.g. the first node, configured without seeds) within one divergent AE cycle initiated by any other peer.
+- [ ] On `READY` restart, when `config.seeds` is non-empty, the daemon re-runs the unconditional gossip bootstrap before starting `GossipEngine`. When `config.seeds` is empty, the daemon skips bootstrap and relies on symmetric AE for peer rediscovery.
 
 ---
 
