@@ -217,3 +217,191 @@ The contact returns `error.node_not_found` if no registry entry has a
 
 - `proposal-node-inspect-05102026-003.md` — original proposal where
   `--peer-view` was specified and then removed.
+
+---
+
+## KV — Writes concurrents simultanément confirmés (post-MVP, non géré)
+
+**Status:** Known limitation — acknowledged, not handled in MVP. Documented for a
+future proposal.
+
+### Description
+
+With RF = 3 and W = 2, two concurrent clients can write V1 on replicas `{A, B}`
+and V2 on replicas `{B, C}` simultaneously. Both writes ack W = 2 replicas. At
+read time:
+
+- A coordinator querying `{A, B}` sees `count(V1) = 2 ≥ 2` → returns V1.
+- A coordinator querying `{B, C}` sees `count(V2) = 2 ≥ 2` → returns V2.
+
+Two concurrent reads may therefore return different results even though both are
+technically "confirmed". This is the fundamental trade-off of a leaderless system
+without a global commit log.
+
+### MVP behaviour
+
+HLC breaks ties deterministically — the coordinator retains the version with the
+highest HLC satisfying `count >= quorum_write`. The divergence window is bounded
+by read repair convergence. If V2.hlc > V1.hlc and B responds in both cases, V2
+is returned deterministically.
+
+### Future work
+
+CAS (compare-and-swap) or vector clocks to detect the conflict at write time and
+either reject or merge. Requires a dedicated proposal. Do not implement before the
+happy-path KV proposal is stable.
+
+### Related Proposals
+
+- `proposal-kv-14052026-006.md` — confirmed version definition, quorum, HLC, read
+  repair.
+
+---
+
+## KV — Distributed lock via DBI_KEYS (future work)
+
+**Status:** Design validated — out of scope for the KV proposal. Dedicated future proposal.
+
+### Idea
+
+The LMDB store is log-structured with `DBI_KEYS` tagged by entry type
+(`b"\x00"` confirmed, `b"\x01"` staging, `b"\x02"` hint, `b"\x04"` stale,
+`b"\xff"` phantom). A `b"\x03"` lock tag would enable a distributed lock without
+an external coordinator.
+
+**Mechanism:**
+
+1. **Lock acquire**: quorum write of a lock record (tag `b"\x03"`) on `DBI_KEYS`
+   with the current HLC timestamp T_lock. Same path as a normal `kv.put`.
+   Returns T_lock as the token to the client.
+
+2. **Data write with lock**: `kv.replicate` includes `lock_hlc=T_lock`. Each
+   replica, before writing to `DBI_LOG`, atomically checks within an LMDB
+   transaction: if the latest `DBI_KEYS` entry for the key is a lock tag and its
+   HLC ≠ `lock_hlc` → reject.
+
+3. **Implicit release**: writing to `DBI_LOG` creates a new confirmed `DBI_KEYS`
+   entry (HLC T_data > T_lock). The lock is no longer the latest → released
+   without an additional message.
+
+4. **TTL**: stored in the lock record value. Past expiry, replicas treat the key
+   as having no active lock.
+
+### Safety proof by quorum
+
+Let S_B be the W replicas that acked lock T_B (latest = T_B on each), and S_A
+be the W replicas required for data write D_A to succeed (latest = T_A
+required). Since 2W > RF, S_A ∩ S_B ≠ ∅. For every R* in that intersection:
+R* acked T_B so latest = T_B (append-only, irreversible). The D_A check on R*
+fails (T_B ≠ T_A). D_A cannot reach quorum. **At most one coordinator can
+complete its data write for a given lock round.** ∎
+
+This mechanism requires neither Raft, nor a central coordinator, nor a global
+counter. HLC monotonicity provides natural fencing.
+
+### Related Proposals
+
+- `proposal-kv-14052026-006.md` — DBI_KEYS tags, quorum write, HLC.
+
+---
+
+## KV — Multi-operation transactions via streaming (future work)
+
+**Status:** Design validated — out of scope for the KV proposal. Dedicated future proposal.
+
+### Idea
+
+The `TcpClient.stream()` + `TcpClient.send()` infrastructure (already used by
+rebalance) enables multi-operation transactions without any new network
+primitives. The `correlation_id` becomes the end-to-end transaction handle
+between the client, the coordinator, and the replicas.
+
+```
+Client → coordinator : kv.txn.begin           (correlation_id = T)
+Coordinator → client : kv.txn.ready           (cid = T)
+
+Client → coordinator : kv.txn.lock  key=K    (cid = T)
+Coordinator → replicas : kv.lock    key=K    (cid = T)
+Coordinator → client  : kv.txn.lock.ok        (cid = T)
+
+Client → coordinator : kv.txn.put  key=K     (cid = T)
+Coordinator → replicas : kv.replicate         (cid = T)
+Coordinator → client  : kv.txn.put.ok         (cid = T)
+
+Client → coordinator : kv.txn.commit          (cid = T)
+Coordinator → client : kv.txn.done            (cid = T)  ← stream closed
+```
+
+The coordinator maintains the transaction state in memory for the duration of
+the stream. Replicas identify operations belonging to the same transaction by
+the `correlation_id`. The DBI_INDEX lock (previous use case) provides mutual
+exclusion within the transaction.
+
+A TTL on the coordinator-side stream (global transaction timeout) ensures that
+a disappearing client does not leave orphaned locks indefinitely.
+
+### Related Proposals
+
+- `proposal-rebalance-11052026-005.md` — existing `stream()` + `send()` pattern.
+
+---
+
+## KV — Timeout coordinator `fanout_timeout_ms` et KPI p99 (future work)
+
+**Status:** MVP timeout is a static value in `config.toml`. Dynamic p99-based
+tuning is post-MVP.
+
+### Context
+
+`fanout_timeout_ms` is defined server-side in `config.toml` under `[kv]`. The
+coordinator passes `fanout_timeout_ms / 1000` as the `timeout` parameter to each
+`TcpClient.request()` call in the fanout loop. `ResponseTimeoutError` (or
+`ConnectionClosedError`) from a replica marks that replica as non-responding;
+the coordinator continues collecting acks from the remaining replicas.
+
+The transport layer defines `RESPONSE_TIMEOUT = 30.0 s` in
+`tourillon/core/ports/transport.py`. This is the deadline that `tourctl` (the KV
+client) uses for its own `TcpClient.request()` call to the coordinator. The
+coordinator must therefore respond within 30 s, which constrains
+`fanout_timeout_ms` to < 30 000 ms. The default of 50 ms respects this.
+
+**Server-side minimum:** 10 ms, enforced at node startup. The default of 50 ms
+targets intra-datacenter deployments where p99 inter-node RTT is typically
+< 5 ms. Cross-datacenter deployments should raise this value accordingly.
+
+The correct value is a function of the cluster's p99 inter-node round-trip time,
+which varies with topology, node count, and load.
+
+### Problem
+
+Without instrumentation, the operator has no data-driven basis for tuning
+`fanout_timeout_ms`. The risk is:
+
+- **Too tight**: `kv.error` rate spikes under normal GC pauses or transient
+  network jitter → false availability failures.
+- **Too loose**: slow replicas block the coordinator for seconds before returning
+  an error → high tail latency visible to clients.
+
+### Future work
+
+1. **Expose per-operation latency histograms** on each node (coordinator side):
+   - `kv.put` fanout RTT per replica (p50, p95, p99, p999).
+   - `kv.get` fanout RTT per replica.
+   - Quorum-wait time (time from first send to quorum ack).
+   - These metrics should be accessible via a `tourctl node metrics` command or
+     a Prometheus-compatible scrape endpoint.
+
+2. **Adaptive timeout** (post-MVP): the coordinator observes its own p99 fanout
+   latency over a rolling window and dynamically adjusts an internal soft
+   deadline. `fanout_timeout_ms` in `config.toml` becomes the hard ceiling;
+   the soft deadline adapts downward. This reduces tail latency in healthy
+   clusters without risking false errors under degraded conditions.
+
+3. **SLO alert**: if the observed p99 exceeds a configurable fraction of
+   `fanout_timeout_ms` (e.g. 70%), emit a `WARNING` log recommending the
+   operator either raise `fanout_timeout_ms` or investigate replica latency.
+
+### Related Proposals
+
+- `proposal-kv-14052026-006.md` — `fanout_timeout_ms` definition, coordinator
+  fanout loop, `kv.error` response, server-side minimum 500 ms.
